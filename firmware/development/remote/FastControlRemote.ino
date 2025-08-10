@@ -6,10 +6,11 @@
 #include <SPI.h>
 #include <RF24.h>
 #include <WiFi.h>
-#include <FirebaseESP32.h>
+#include <Firebase_ESP_Client.h>
 
 // Firebase configuration
 #define FIREBASE_HOST "skyforge-4606b-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_DB_URL "https://" FIREBASE_HOST
 #define FIREBASE_AUTH "HBgETEJwFCsLswgXH2SuzYupJPWhJqWnJdfkFvGO"
 #define WIFI_SSID "Dialog 4G"
 #define WIFI_PASSWORD "0N7NT00ANTQ"
@@ -416,7 +417,7 @@ void initializeFirebase()
     if (WiFi.status() != WL_CONNECTED)
         return;
 
-    config.host = FIREBASE_HOST;
+    config.database_url = FIREBASE_DB_URL;
     config.signer.tokens.legacy_token = FIREBASE_AUTH;
 
     // Add timeout and SSL settings for better reliability
@@ -430,6 +431,20 @@ void initializeFirebase()
     {
         Serial.println("Firebase connected!");
         firebaseReady = true;
+
+        // One-time write test to validate connectivity regardless of telemetry
+        FirebaseJson testJson;
+        testJson.set("test", "connection_test");
+        testJson.set("timestamp", (int)time(nullptr));
+        if (Firebase.RTDB.setJSON(&firebaseData, "/connection_test", &testJson))
+        {
+            Serial.println("Firebase write test successful!");
+        }
+        else
+        {
+            Serial.print("Firebase write test failed: ");
+            Serial.println(firebaseData.errorReason());
+        }
     }
     else
     {
@@ -478,7 +493,7 @@ void uploadTelemetryToFirebase()
     // Store data with timestamp - single node, latest record is most recent
     String dataPath = "/telemetry/" + String(timestamp);
 
-    bool uploadSuccess = Firebase.setJSON(firebaseData, dataPath, json);
+    bool uploadSuccess = Firebase.RTDB.setJSON(&firebaseData, dataPath.c_str(), &json);
 
     // Simple upload result reporting
     if (uploadSuccess)
