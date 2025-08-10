@@ -103,6 +103,10 @@ struct PIDController
     unsigned long lastTime;
     bool enabled;
 
+    // Integrator gating & leak
+    bool allowIntegral; // External gating flag (e.g. throttle above gate)
+    double iTermLeak;   // Leak factor per compute call (fraction of iTerm to bleed off when active)
+
     // Derivative filtering
     double derivativeAlpha; // Low-pass filter coefficient for derivative
 
@@ -142,6 +146,9 @@ struct PIDController
         enabled = false;
         wasOutputSaturated = false;
 
+        allowIntegral = true;
+        iTermLeak = 0.001; // Default very small leak (0.1% per compute)
+
         // Filter coefficients (higher = more filtering)
         derivativeAlpha = 0.1; // 10% new, 90% old for derivative
         setpointAlpha = 0.05;  // 5% new, 95% old for setpoint smoothing
@@ -177,28 +184,40 @@ struct PIDController
         // Proportional term
         proportional_term = kp * error;
 
-        // Integral term with advanced anti-windup
-        // Only accumulate integral if output is not saturated OR error is helping to reduce saturation
-        bool shouldAccumulateIntegral = !wasOutputSaturated ||
-                                        (wasOutputSaturated && ((error > 0 && output <= outputMin) ||
-                                                                (error < 0 && output >= outputMax)));
+        // Integral term handling with gating and leak
+        // Only accumulate if integral allowed AND (not saturated OR error driving out of saturation)
+        bool shouldAccumulateIntegral = allowIntegral && (!wasOutputSaturated ||
+                                                          (wasOutputSaturated && ((error > 0 && output <= outputMin) ||
+                                                                                  (error < 0 && output >= outputMax))));
 
         if (shouldAccumulateIntegral && ki != 0.0)
         {
             iTerm += ki * error * dt;
-
-            // Clamp integral term to prevent windup
-            integral_saturated = false;
-            if (iTerm > iTermMax)
+        }
+        else
+        {
+            // Apply leak when not accumulating to bleed off stored integral (prevents lingering bias)
+            if (iTermLeak > 0.0 && iTerm != 0.0)
             {
-                iTerm = iTermMax;
-                integral_saturated = true;
+                double leakFactor = (1.0 - iTermLeak);
+                if (leakFactor < 0.0)
+                    leakFactor = 0.0;
+                if (leakFactor > 1.0)
+                    leakFactor = 1.0;
+                iTerm *= leakFactor;
             }
-            else if (iTerm < iTermMin)
-            {
-                iTerm = iTermMin;
-                integral_saturated = true;
-            }
+        }
+        // Clamp integral term to prevent windup
+        integral_saturated = false;
+        if (iTerm > iTermMax)
+        {
+            iTerm = iTermMax;
+            integral_saturated = true;
+        }
+        else if (iTerm < iTermMin)
+        {
+            iTerm = iTermMin;
+            integral_saturated = true;
         }
         integral_term = iTerm;
 
@@ -240,6 +259,13 @@ struct PIDController
 
         return output;
     }
+
+    // Inline diagnostic getters (used by web dashboard)
+    double getProportionalTerm() const { return proportional_term; }
+    double getIntegralTerm() const { return integral_term; }
+    double getDerivativeTerm() const { return derivative_term; }
+    bool isOutputSaturated() const { return output_saturated; }
+    bool isIntegralSaturated() const { return integral_saturated; }
 
     void reset()
     {
@@ -304,22 +330,18 @@ struct PIDController
     {
         if (enable && !enabled)
         {
-            // Switching from manual to auto - initialize
             reset();
         }
         enabled = enable;
     }
 
-    // Diagnostic functions for web dashboard
-    double getProportionalTerm() { return proportional_term; }
-    double getIntegralTerm() { return integral_term; }
-    double getDerivativeTerm() { return derivative_term; }
-    bool isOutputSaturated() { return output_saturated; }
-    bool isIntegralSaturated() { return integral_saturated; }
-    double getSmoothedSetpoint() { return smoothedSetpoint; }
-};
+    // (Getters inserted later in struct)
+}; // End of PIDController struct
 
-// FreeRTOS Handles
+// ================================
+// Global RTOS handles & synchronization primitives
+// (Were accidentally injected inside PIDController; restored here)
+// ================================
 TaskHandle_t controlTaskHandle = NULL;
 TaskHandle_t sensorTaskHandle = NULL;
 TaskHandle_t telemetryTaskHandle = NULL;
@@ -349,6 +371,37 @@ struct FlightState
     unsigned long last_command_time;
     unsigned long arm_time;
 };
+
+// Custom PID Controllers - Using advanced controller from droneFreeRTOS.ino
+PIDController rollPID, pitchPID, yawPID, altitudePID;
+
+// PID Parameters (will be tuned) - Enhanced values for better stabilization
+struct PIDParams
+{
+    double roll_kp, roll_ki, roll_kd;
+    double pitch_kp, pitch_ki, pitch_kd;
+    double yaw_kp, yaw_ki, yaw_kd;
+    double altitude_kp, altitude_ki, altitude_kd;
+};
+
+// Initialize with enhanced values for better stabilization
+PIDParams pidParams = {
+    // Roll PID - Enhanced for stronger correction with anti-windup
+    .roll_kp = 2.5,  // Balanced response
+    .roll_ki = 0.1,  // Small integral for steady-state error
+    .roll_kd = 0.15, // Damping for smooth control
+    // Pitch PID - Enhanced for stronger correction with anti-windup
+    .pitch_kp = 2.5,  // Balanced response
+    .pitch_ki = 0.1,  // Small integral for steady-state error
+    .pitch_kd = 0.15, // Damping for smooth control
+    // Yaw PID - Enhanced for better authority with rate control
+    .yaw_kp = 1.0,  // Lower gain for yaw
+    .yaw_ki = 0.05, // Very small integral for yaw
+    .yaw_kd = 0.05, // Minimal damping for yaw
+    // Altitude PID
+    .altitude_kp = 1.5,
+    .altitude_ki = 0.2,
+    .altitude_kd = 0.8};
 
 // Control Inputs (from WiFi dashboard or NRF24L01)
 struct ControlInputs
@@ -400,37 +453,6 @@ struct SensorData
     unsigned long timestamp;
     bool valid;
 };
-
-// Custom PID Controllers - Using advanced controller from droneFreeRTOS.ino
-PIDController rollPID, pitchPID, yawPID, altitudePID;
-
-// PID Parameters (will be tuned) - Enhanced values for better stabilization
-struct PIDParams
-{
-    double roll_kp, roll_ki, roll_kd;
-    double pitch_kp, pitch_ki, pitch_kd;
-    double yaw_kp, yaw_ki, yaw_kd;
-    double altitude_kp, altitude_ki, altitude_kd;
-};
-
-// Initialize with enhanced values for better stabilization
-PIDParams pidParams = {
-    // Roll PID - Enhanced for stronger correction with anti-windup
-    .roll_kp = 2.5,  // Balanced response
-    .roll_ki = 0.1,  // Small integral for steady-state error
-    .roll_kd = 0.15, // Damping for smooth control
-    // Pitch PID - Enhanced for stronger correction with anti-windup
-    .pitch_kp = 2.5,  // Balanced response
-    .pitch_ki = 0.1,  // Small integral for steady-state error
-    .pitch_kd = 0.15, // Damping for smooth control
-    // Yaw PID - Enhanced for better authority with rate control
-    .yaw_kp = 1.0,  // Lower gain for yaw
-    .yaw_ki = 0.05, // Very small integral for yaw
-    .yaw_kd = 0.05, // Minimal damping for yaw
-    // Altitude PID
-    .altitude_kp = 1.5,
-    .altitude_ki = 0.2,
-    .altitude_kd = 0.8};
 
 // IMU Calibration Structure
 struct IMUCalibration
@@ -564,13 +586,160 @@ struct MotorCalibration
     float motor4_offset; // Back Left (CCW) (reduce if left side lifts early)
 };
 
-// Motor calibration - fixed values based on testing
+// Motor calibration offsets (applied only in MANUAL mode). Defaults to zero.
 MotorCalibration motorCal = {
-    .motor1_offset = -15.0, // Front Right (CCW) - reduce by 15 PWM units
-    .motor2_offset = -15.0, // Back Right (CW) - reduce by 15 PWM units
-    .motor3_offset = -8.0,  // Front Left (CW) - reduce by 8 PWM units (fixed one-side lifting)
-    .motor4_offset = -8.0   // Back Left (CCW) - reduce by 8 PWM units (fixed one-side lifting)
+    .motor1_offset = 0.0, // Front Right (CCW)
+    .motor2_offset = 0.0, // Back Right (CW)
+    .motor3_offset = 0.0, // Front Left (CW)
+    .motor4_offset = 0.0  // Back Left (CCW)
 };
+
+// =====================================
+// Unified Motor Mixing (Matches droneFreeRTOS)
+// =====================================
+// Tunable mixer gains (μs contribution at full normalized input |R|=|P|=|Y|=1)
+// Keep identical to droneFreeRTOS for consistent tuning behavior across builds.
+float MIX_KR = 200.0f; // Roll gain
+float MIX_KP = 200.0f; // Pitch gain
+float MIX_KY = 150.0f; // Yaw gain
+
+// =====================================
+// Live-tunable control enhancement variables (mirroring droneFreeRTOS)
+// =====================================
+float manualAxisGain = 1.30f; // Extra authority in manual mode (scales stick R/P/Y)
+float throttleGate = 0.35f;   // Below this throttle, disable PID integrators (and optionally entire PID)
+float slewRateRP = 180.0f;    // deg/sec max change for roll/pitch angle setpoints (slew limiter)
+float slewRateYaw = 360.0f;   // deg/sec^2 equivalent for yaw rate command smoothing (simplified)
+float yawFeedForward = 0.15f; // Fraction of yaw setpoint added directly to yaw PID output
+
+// Advanced fusion/control feature toggles (default off to preserve current behavior)
+bool USE_KALMAN_ATTITUDE = false;     // If true, use 1D Kalman filter for roll/pitch angles
+bool USE_CASCADED_ANGLE_RATE = false; // If true, use angle->rate cascaded loops for roll/pitch
+
+// Cascaded inner rate PID controllers (roll/pitch); yaw already rate-controlled by yawPID
+PIDController rollRatePID, pitchRatePID;
+
+// Rate PID tunables and limits
+struct RatePIDParams
+{
+    double roll_kp, roll_ki, roll_kd;
+    double pitch_kp, pitch_ki, pitch_kd;
+};
+
+RatePIDParams ratePidParams = {
+    // conservative defaults; tune live via dashboard
+    .roll_kp = 0.10,
+    .roll_ki = 0.02,
+    .roll_kd = 0.002,
+    .pitch_kp = 0.10,
+    .pitch_ki = 0.02,
+    .pitch_kd = 0.002};
+
+float MAX_ROLL_PITCH_RATE = 180.0f; // deg/s limit for outer angle loop output (desired rate)
+
+// 1D Kalman filter state for attitude (roll/pitch)
+struct Kalman1D
+{
+    float x; // angle estimate (deg)
+    float p; // estimate variance
+    bool initialized;
+} kalmanRoll = {0, 1, false}, kalmanPitch = {0, 1, false};
+
+// Kalman noise parameters (tunable via dashboard)
+float KALMAN_RATE_STD = 4.0f; // deg/s (gyro rate noise std)
+float KALMAN_MEAS_STD = 3.0f; // deg (accel angle noise std)
+
+// Slew limiter state
+static float prevRollSetpointCmd = 0.0f;
+static float prevPitchSetpointCmd = 0.0f;
+static float prevYawRateCmd = 0.0f;
+static unsigned long prevSlewTimeMs = 0;
+
+// ESC pulse bounds (use existing defines)
+#ifndef PWM_MIN_PULSE
+#define PWM_MIN_PULSE MOTOR_MIN
+#endif
+#ifndef PWM_MAX_PULSE
+#define PWM_MAX_PULSE MOTOR_MAX
+#endif
+
+// Scaled mixer applying dynamic saturation management (same algorithm as droneFreeRTOS)
+// Writes directly into motorOutputs.*
+static inline void applyScaledMotorMix(float baseMicros, float Rn, float Pn, float Yn)
+{
+    // Constrain base
+    if (baseMicros < PWM_MIN_PULSE)
+        baseMicros = PWM_MIN_PULSE;
+    if (baseMicros > PWM_MAX_PULSE)
+        baseMicros = PWM_MAX_PULSE;
+
+    // Raw mixes (direction pattern identical to droneFreeRTOS M1..M4 order)
+    float m1 = -MIX_KR * Rn - MIX_KP * Pn + MIX_KY * Yn; // Front Right (CCW)
+    float m2 = -MIX_KR * Rn + MIX_KP * Pn - MIX_KY * Yn; // Back Right (CW)
+    float m3 = MIX_KR * Rn - MIX_KP * Pn - MIX_KY * Yn;  // Front Left (CW)
+    float m4 = MIX_KR * Rn + MIX_KP * Pn + MIX_KY * Yn;  // Back Left (CCW)
+
+    // Find mix extremes
+    float posMax = 0.0f, negMin = 0.0f;
+    float mixes[4] = {m1, m2, m3, m4};
+    for (int i = 0; i < 4; ++i)
+    {
+        if (mixes[i] > posMax)
+            posMax = mixes[i];
+        if (mixes[i] < negMin)
+            negMin = mixes[i];
+    }
+
+    float s_pos = 1.0f;
+    float s_neg = 1.0f;
+    if (posMax > 0.0f)
+    {
+        float headroomHigh = PWM_MAX_PULSE - baseMicros;
+        if (headroomHigh < 0)
+            headroomHigh = 0;
+        s_pos = headroomHigh / posMax;
+        if (s_pos > 1.0f)
+            s_pos = 1.0f;
+    }
+    if (negMin < 0.0f)
+    {
+        float headroomLow = baseMicros - PWM_MIN_PULSE;
+        if (headroomLow < 0)
+            headroomLow = 0;
+        s_neg = headroomLow / (-negMin);
+        if (s_neg > 1.0f)
+            s_neg = 1.0f;
+    }
+
+    // Apply scaling
+    float f1 = baseMicros + (m1 >= 0 ? s_pos * m1 : s_neg * m1);
+    float f2 = baseMicros + (m2 >= 0 ? s_pos * m2 : s_neg * m2);
+    float f3 = baseMicros + (m3 >= 0 ? s_pos * m3 : s_neg * m3);
+    float f4 = baseMicros + (m4 >= 0 ? s_pos * m4 : s_neg * m4);
+
+    // Clamp
+    if (f1 < PWM_MIN_PULSE)
+        f1 = PWM_MIN_PULSE;
+    if (f1 > PWM_MAX_PULSE)
+        f1 = PWM_MAX_PULSE;
+    if (f2 < PWM_MIN_PULSE)
+        f2 = PWM_MIN_PULSE;
+    if (f2 > PWM_MAX_PULSE)
+        f2 = PWM_MAX_PULSE;
+    if (f3 < PWM_MIN_PULSE)
+        f3 = PWM_MIN_PULSE;
+    if (f3 > PWM_MAX_PULSE)
+        f3 = PWM_MAX_PULSE;
+    if (f4 < PWM_MIN_PULSE)
+        f4 = PWM_MIN_PULSE;
+    if (f4 > PWM_MAX_PULSE)
+        f4 = PWM_MAX_PULSE;
+
+    motorOutputs.motor1 = (int)f1;
+    motorOutputs.motor2 = (int)f2;
+    motorOutputs.motor3 = (int)f3;
+    motorOutputs.motor4 = (int)f4;
+}
 
 // Function Declarations
 void initializeHardware();
@@ -737,13 +906,13 @@ void initializeHardware()
         Serial.println("ERROR: BME280 initialization failed!");
     }
 
-    // Initialize ESCs
+    // Initialize ESCs (pre-calibrated to 1000–2000µs range; no runtime calibration needed)
     esc1.attach(ESC1_PIN, MOTOR_MIN, MOTOR_MAX);
     esc2.attach(ESC2_PIN, MOTOR_MIN, MOTOR_MAX);
     esc3.attach(ESC3_PIN, MOTOR_MIN, MOTOR_MAX);
     esc4.attach(ESC4_PIN, MOTOR_MIN, MOTOR_MAX);
 
-    // Set motors to minimum (safety)
+    // Immediately drive all motors to minimum for safety
     esc1.writeMicroseconds(MOTOR_ARM_VALUE);
     esc2.writeMicroseconds(MOTOR_ARM_VALUE);
     esc3.writeMicroseconds(MOTOR_ARM_VALUE);
@@ -796,6 +965,14 @@ void initializePIDControllers()
     altitudePID.setDerivativeFilter(0.05);  // Light filtering for altitude
     altitudePID.setSetpointSmoothing(0.02); // Gentle altitude setpoint changes
 
+    // Initialize inner rate PIDs (disabled by default unless cascaded enabled)
+    rollRatePID.initialize(ratePidParams.roll_kp, ratePidParams.roll_ki, ratePidParams.roll_kd, -400, 400);
+    rollRatePID.setDerivativeFilter(0.2);
+    rollRatePID.setSetpointSmoothing(0.05);
+    pitchRatePID.initialize(ratePidParams.pitch_kp, ratePidParams.pitch_ki, ratePidParams.pitch_kd, -400, 400);
+    pitchRatePID.setDerivativeFilter(0.2);
+    pitchRatePID.setSetpointSmoothing(0.05);
+
     Serial.println("Custom PID controllers initialized with advanced features:");
     Serial.println("- Anti-windup protection");
     Serial.println("- Derivative filtering");
@@ -805,6 +982,9 @@ void initializePIDControllers()
                   pidParams.roll_kp, pidParams.roll_ki, pidParams.roll_kd,
                   pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd,
                   pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd);
+    Serial.printf("Rate PID Gains - RollRate: P=%.2f I=%.2f D=%.3f, PitchRate: P=%.2f I=%.2f D=%.3f\n",
+                  ratePidParams.roll_kp, ratePidParams.roll_ki, ratePidParams.roll_kd,
+                  ratePidParams.pitch_kp, ratePidParams.pitch_ki, ratePidParams.pitch_kd);
 }
 
 void connectWiFi()
@@ -910,7 +1090,7 @@ void controlTask(void *parameter)
 
                 // PID Debug Section - Enhanced with custom PID diagnostics
                 debugData.pid_active = (flightState.mode >= MODE_STABILIZE);
-                debugData.pid_enabled_by_throttle = (controlInputs.throttle > 0.30); // Show throttle deadband status (30%)
+                debugData.pid_enabled_by_throttle = (controlInputs.throttle > throttleGate); // Reflect live throttle gate
                 debugData.roll_output = rollPID.output;
                 debugData.pitch_output = pitchPID.output;
                 debugData.yaw_output = yawPID.output;
@@ -983,29 +1163,8 @@ void controlTask(void *parameter)
         {
             if (flightState.mode == MODE_MANUAL)
             {
-                // Manual mode - direct throttle control without PID
-                float baseThrottle = controlInputs.throttle;
-                int basePWM = mapFloat(baseThrottle, 0.0, 1.0, MOTOR_IDLE, MOTOR_MAX);
-
-                // All motors get same throttle in manual mode
-                motorOutputs.motor1 = basePWM;
-                motorOutputs.motor2 = basePWM;
-                motorOutputs.motor3 = basePWM;
-                motorOutputs.motor4 = basePWM;
-
-                // Apply motor calibration offsets in manual mode too
-                motorOutputs.motor1 += motorCal.motor1_offset;
-                motorOutputs.motor2 += motorCal.motor2_offset;
-                motorOutputs.motor3 += motorCal.motor3_offset;
-                motorOutputs.motor4 += motorCal.motor4_offset;
-
-                // Constrain all motor outputs to safe range
-                motorOutputs.motor1 = constrain(motorOutputs.motor1, MOTOR_MIN, MOTOR_MAX);
-                motorOutputs.motor2 = constrain(motorOutputs.motor2, MOTOR_MIN, MOTOR_MAX);
-                motorOutputs.motor3 = constrain(motorOutputs.motor3, MOTOR_MIN, MOTOR_MAX);
-                motorOutputs.motor4 = constrain(motorOutputs.motor4, MOTOR_MIN, MOTOR_MAX);
-
-                // Output to motors
+                // Manual mode - use unified mixer (handles base throttle, inputs, scaling, and offsets)
+                mixMotorOutputs();
                 outputMotorCommands();
             }
             else if (flightState.mode >= MODE_STABILIZE)
@@ -1135,7 +1294,8 @@ void updateSensors()
         sensorData.accel_x = accel.acceleration.x;
         sensorData.accel_y = accel.acceleration.y;
         sensorData.accel_z = accel.acceleration.z;
-        sensorData.roll_rate = -gyro.gyro.x * 180.0 / PI; // Fix direction to match tilt
+        // Roll rate: removed previous inversion (was negated) to correct inverted roll response
+        sensorData.roll_rate = gyro.gyro.x * 180.0 / PI;
         sensorData.pitch_rate = gyro.gyro.y * 180.0 / PI;
         sensorData.yaw_rate = gyro.gyro.z * 180.0 / PI;
         xSemaphoreGive(sensorMutex);
@@ -1208,6 +1368,7 @@ void calculateOrientation()
 {
     static float roll_angle = 0.0;
     static float pitch_angle = 0.0;
+    static bool prevCalibrated = false; // Track calibration edge
     static unsigned long lastUpdate = 0;
 
     unsigned long now = millis();
@@ -1241,27 +1402,69 @@ void calculateOrientation()
         accel_x -= imuCal.accel_x_offset;
         accel_y -= imuCal.accel_y_offset;
         accel_z -= imuCal.accel_z_offset;
-        gyro_roll -= (-imuCal.gyro_x_offset * 180.0 / PI); // Match corrected direction
+        // Subtract stored gyro biases (convert stored rad/s to deg/s)
+        gyro_roll -= (imuCal.gyro_x_offset * 180.0 / PI);
         gyro_pitch -= (imuCal.gyro_y_offset * 180.0 / PI);
     }
 
     // Calculate angles from accelerometer
     // Fix roll axis to match physical tilt direction
-    float accel_roll = -atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;
+    // Remove leading negative to align roll angle sign with control input (previous sign caused inverted response)
+    float accel_roll = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;
     float accel_pitch = atan2(-accel_x, sqrt(accel_y * accel_y + accel_z * accel_z)) * 180.0 / PI;
 
     // Apply calibration offsets to get relative angles from level position
-    if (imuCal.calibrated)
+    // Do not subtract additional angle offsets here; accelerometer biases are already
+    // compensated above. Additional angle offset subtraction would double-correct and
+    // introduce a residual bias when level. The complementary filter is seeded after
+    // calibration to ensure the fused attitude starts at level.
+
+    // If calibration was just completed, re-seed the complementary filter state
+    // to the level-corrected accelerometer estimate to avoid residual bias.
+    if (imuCal.calibrated && !prevCalibrated)
     {
-        accel_roll -= imuCal.roll_offset;
-        accel_pitch -= imuCal.pitch_offset;
+        roll_angle = accel_roll;
+        pitch_angle = accel_pitch;
     }
+    prevCalibrated = imuCal.calibrated;
 
-    // Complementary filter (combine gyro and accel)
-    const float alpha = 0.98; // Gyro weight (higher = trust gyro more)
-
-    roll_angle = alpha * (roll_angle + gyro_roll * dt) + (1.0 - alpha) * accel_roll;
-    pitch_angle = alpha * (pitch_angle + gyro_pitch * dt) + (1.0 - alpha) * accel_pitch;
+    // Fusion: complementary filter or 1D Kalman (optional)
+    if (USE_KALMAN_ATTITUDE)
+    {
+        // Initialize on first use or on calibration edge
+        if (!kalmanRoll.initialized || (imuCal.calibrated && !prevCalibrated))
+        {
+            kalmanRoll.x = accel_roll;
+            kalmanRoll.p = 4.0f;
+            kalmanRoll.initialized = true;
+            kalmanPitch.x = accel_pitch;
+            kalmanPitch.p = 4.0f;
+            kalmanPitch.initialized = true;
+        }
+        // Prediction
+        float q = (KALMAN_RATE_STD * KALMAN_RATE_STD) * dt; // process noise variance contribution
+        kalmanRoll.x += gyro_roll * dt;
+        kalmanRoll.p += q;
+        kalmanPitch.x += gyro_pitch * dt;
+        kalmanPitch.p += q;
+        // Measurement update
+        float r = (KALMAN_MEAS_STD * KALMAN_MEAS_STD);
+        float k_r = kalmanRoll.p / (kalmanRoll.p + r);
+        float k_p = kalmanPitch.p / (kalmanPitch.p + r);
+        kalmanRoll.x += k_r * (accel_roll - kalmanRoll.x);
+        kalmanRoll.p *= (1.0f - k_r);
+        kalmanPitch.x += k_p * (accel_pitch - kalmanPitch.x);
+        kalmanPitch.p *= (1.0f - k_p);
+        roll_angle = kalmanRoll.x;
+        pitch_angle = kalmanPitch.x;
+    }
+    else
+    {
+        // Complementary filter (combine gyro and accel)
+        const float alpha = 0.98; // Gyro weight (higher = trust gyro more)
+        roll_angle = alpha * (roll_angle + gyro_roll * dt) + (1.0f - alpha) * accel_roll;
+        pitch_angle = alpha * (pitch_angle + gyro_pitch * dt) + (1.0f - alpha) * accel_pitch;
+    }
 
     // Update global sensor data
     if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
@@ -1287,70 +1490,162 @@ void calculateOrientation()
 
 void runPIDControllers()
 {
-    // Set setpoints based on control inputs and flight mode
-    if (flightState.mode == MODE_STABILIZE)
-    {
-        // In stabilize mode, stick inputs set angle setpoints relative to calibrated level position
-        if (imuCal.calibrated)
-        {
-            // Setpoints are relative to calibrated level (0° = level position from calibration)
-            // Stick inputs add desired angle deviation from level
-            rollPID.setpoint = controlInputs.roll * 30.0;   // ±30 degrees max from calibrated level
-            pitchPID.setpoint = controlInputs.pitch * 30.0; // ±30 degrees max from calibrated level
-            yawPID.setpoint = controlInputs.yaw * 180.0;    // ±180 deg/sec max (rate control)
+    // Time delta for slew limiting
+    unsigned long nowMs = millis();
+    float dt = (prevSlewTimeMs == 0) ? 0.01f : (float)(nowMs - prevSlewTimeMs) / 1000.0f;
+    if (dt <= 0)
+        dt = 0.01f; // fallback
+    prevSlewTimeMs = nowMs;
 
-            // Note: Current sensor readings are already corrected
-            // to be relative to the calibrated level position in calculateOrientation()
-            // So when input = 0°, the drone is at the calibrated level position
-            // When setpoint = 0°, we want the drone to return to calibrated level
+    // Raw desired commands from sticks (pre-slew)
+    // Invert roll stick here to compensate for previous sensor sign convention change
+    float desiredRollDeg = (controlInputs.roll) * 30.0f; // +/-30°
+    float desiredPitchDeg = controlInputs.pitch * 30.0f; // +/-30°
+    float desiredYawRate = controlInputs.yaw * 180.0f;   // +/-180°/s (rate)
+
+    // Apply calibration reference if IMU calibrated (angles already relative in sensorData)
+    // Slew limit roll/pitch setpoints
+    float maxDeltaRP = slewRateRP * dt; // deg change allowed this cycle
+    float deltaR = desiredRollDeg - prevRollSetpointCmd;
+    if (deltaR > maxDeltaRP)
+        deltaR = maxDeltaRP;
+    if (deltaR < -maxDeltaRP)
+        deltaR = -maxDeltaRP;
+    prevRollSetpointCmd += deltaR;
+
+    float deltaP = desiredPitchDeg - prevPitchSetpointCmd;
+    if (deltaP > maxDeltaRP)
+        deltaP = maxDeltaRP;
+    if (deltaP < -maxDeltaRP)
+        deltaP = -maxDeltaRP;
+    prevPitchSetpointCmd += deltaP;
+
+    // Yaw slew limiting (rate command smoothing)
+    float maxDeltaYaw = slewRateYaw * dt; // deg/s change allowed
+    float deltaY = desiredYawRate - prevYawRateCmd;
+    if (deltaY > maxDeltaYaw)
+        deltaY = maxDeltaYaw;
+    if (deltaY < -maxDeltaYaw)
+        deltaY = -maxDeltaYaw;
+    prevYawRateCmd += deltaY;
+
+    if (flightState.mode >= MODE_STABILIZE)
+    {
+        if (!USE_CASCADED_ANGLE_RATE)
+        {
+            // Direct angle stabilization (existing behavior)
+            rollPID.setpoint = prevRollSetpointCmd;
+            pitchPID.setpoint = prevPitchSetpointCmd;
         }
         else
         {
-            // Fallback if not calibrated - use raw stick inputs
-            rollPID.setpoint = controlInputs.roll * 30.0;   // ±30 degrees max
-            pitchPID.setpoint = controlInputs.pitch * 30.0; // ±30 degrees max
-            yawPID.setpoint = controlInputs.yaw * 180.0;    // ±180 deg/sec max
+            // Outer angle loop will compute desired rates; set setpoints for rate PIDs later
+            rollPID.setpoint = prevRollSetpointCmd;
+            pitchPID.setpoint = prevPitchSetpointCmd;
         }
+        yawPID.setpoint = prevYawRateCmd; // yaw stays a rate setpoint
     }
 
-    if (flightState.mode == MODE_ALTITUDE_HOLD && flightState.altitude_hold_active)
+    // Altitude hold setpoint maintenance handled elsewhere
+
+    // Throttle gate now only gates integral accumulation; P/D remain active so sliders respond at any throttle
+    bool aboveGate = controlInputs.throttle > throttleGate;
+    rollPID.allowIntegral = aboveGate;
+    pitchPID.allowIntegral = aboveGate;
+    yawPID.allowIntegral = aboveGate;
+
+    if (flightState.mode >= MODE_STABILIZE)
     {
-        // Altitude hold mode - maintain current altitude
-        // altitudePID.setpoint is set when altitude hold is activated
-    }
-
-    // Throttle deadband: Only run PID when there's enough throttle for effective control
-    // This prevents PID windup when drone is on the ground
-    const float THROTTLE_DEADBAND = 0.30; // 30% throttle minimum for PID control (matches liftoff point)
-
-    if (controlInputs.throttle > THROTTLE_DEADBAND)
-    {
-        // Sufficient throttle for control - enable custom PID controllers
-        rollPID.setMode(true);
-        pitchPID.setMode(true);
-        yawPID.setMode(true);
-
-        // Set current sensor readings as inputs
-        if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
+        if (!USE_CASCADED_ANGLE_RATE)
         {
-            rollPID.input = sensorData.roll_angle;
-            pitchPID.input = sensorData.pitch_angle;
-            yawPID.input = sensorData.yaw_rate; // Rate control for yaw
-            xSemaphoreGive(sensorMutex);
+            // Original direct angle control path
+            rollPID.setMode(true);
+            pitchPID.setMode(true);
+            yawPID.setMode(true);
+
+            if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
+            {
+                rollPID.input = sensorData.roll_angle;
+                pitchPID.input = sensorData.pitch_angle;
+                yawPID.input = sensorData.yaw_rate;
+                xSemaphoreGive(sensorMutex);
+            }
+
+            rollPID.compute();
+            pitchPID.compute();
+            yawPID.compute();
+        }
+        else
+        {
+            // Cascaded angle->rate: outer angle PIDs produce desired rates; inner PIDs track actual rates
+            rollPID.setMode(true);
+            pitchPID.setMode(true);
+            yawPID.setMode(true); // yaw still direct rate
+            rollRatePID.setMode(true);
+            pitchRatePID.setMode(true);
+
+            float rollAngle, pitchAngle, rollRate, pitchRate, yawRate;
+            if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
+            {
+                rollAngle = sensorData.roll_angle;
+                pitchAngle = sensorData.pitch_angle;
+                rollRate = sensorData.roll_rate;
+                pitchRate = sensorData.pitch_rate;
+                yawRate = sensorData.yaw_rate;
+                xSemaphoreGive(sensorMutex);
+            }
+            else
+            {
+                // Fallback to last known inputs in controllers
+                rollAngle = rollPID.input;
+                pitchAngle = pitchPID.input;
+                rollRate = 0;
+                pitchRate = 0;
+                yawRate = 0;
+            }
+
+            rollPID.input = rollAngle;
+            pitchPID.input = pitchAngle;
+            yawPID.input = yawRate;
+
+            // Outer angle compute to get desired rate commands
+            double rollDesiredRate = constrainFloat((float)rollPID.compute(), -MAX_ROLL_PITCH_RATE, MAX_ROLL_PITCH_RATE);
+            double pitchDesiredRate = constrainFloat((float)pitchPID.compute(), -MAX_ROLL_PITCH_RATE, MAX_ROLL_PITCH_RATE);
+
+            // Inner rate loop setpoints and inputs
+            rollRatePID.setpoint = rollDesiredRate;
+            pitchRatePID.setpoint = pitchDesiredRate;
+            rollRatePID.input = rollRate;
+            pitchRatePID.input = pitchRate;
+
+            rollRatePID.allowIntegral = aboveGate;
+            pitchRatePID.allowIntegral = aboveGate;
+            rollRatePID.compute();
+            pitchRatePID.compute();
+
+            // Map inner loop outputs into original roll/pitch PID outputs for mixer
+            rollPID.output = rollRatePID.output;
+            pitchPID.output = pitchRatePID.output;
+            // Yaw direct
+            yawPID.compute();
         }
 
-        // Compute PID outputs with advanced features
-        rollPID.compute();
-        pitchPID.compute();
-        yawPID.compute();
+        // Yaw feed-forward always applies
+        if (yawFeedForward != 0.0f)
+        {
+            double ff = yawFeedForward * yawPID.setpoint; // setpoint in deg/s
+            yawPID.output += ff;
+            if (yawPID.output > yawPID.outputMax)
+                yawPID.output = yawPID.outputMax;
+            if (yawPID.output < yawPID.outputMin)
+                yawPID.output = yawPID.outputMin;
+        }
     }
     else
     {
-        // Insufficient throttle - disable PID to prevent windup and set outputs to zero
         rollPID.setMode(false);
         pitchPID.setMode(false);
         yawPID.setMode(false);
-
         rollPID.output = 0.0;
         pitchPID.output = 0.0;
         yawPID.output = 0.0;
@@ -1370,65 +1665,64 @@ void runPIDControllers()
 
 void mixMotorOutputs()
 {
-    // Calculate base throttle
-    float baseThrottle = controlInputs.throttle;
+    // 1. Determine base throttle with dynamic headroom (align with droneFreeRTOS behavior)
+    // controlInputs.throttle expected 0..1
+    float throttleInputNorm = constrainFloat(controlInputs.throttle, 0.0f, 1.0f);
 
-    // In altitude hold mode, use PID output for throttle
-    if (flightState.altitude_hold_active)
+    float baseMicros;
+    if (flightState.mode == MODE_MANUAL)
     {
-        Serial.printf("ALTITUDE HOLD ACTIVE - Overriding throttle!\n");
-        baseThrottle = mapFloat(altitudePID.output, 0, 1000, 0.0, 1.0);
-        baseThrottle = constrainFloat(baseThrottle, 0.0, 1.0);
-        Serial.printf("Altitude override - altitudeOutput: %.1f, new baseThrottle: %.3f\n", altitudePID.output, baseThrottle);
+        // Manual: give full usable range (idle..max) directly
+        baseMicros = mapFloat(throttleInputNorm, 0.0f, 1.0f, MOTOR_IDLE, MOTOR_MAX);
+    }
+    else
+    {
+        // Option B: NO pre-reserved headroom. Use full user throttle range (idle..max) for base.
+        // Differential authority is then dynamically scaled inside applyScaledMotorMix.
+        baseMicros = mapFloat(throttleInputNorm, 0.0f, 1.0f, MOTOR_IDLE, MOTOR_MAX);
+
+        // Altitude hold additive correction (only if active) applied on top of full-range base.
+        if (flightState.altitude_hold_active)
+        {
+            const float ALT_CORR_MAX = 300.0f;                          // ±300 µs window
+            float centeredAlt = (altitudePID.output - 500.0f) / 500.0f; // altitudePID 0..1000 -> -1..+1
+            centeredAlt = constrainFloat(centeredAlt, -1.0f, 1.0f);
+            baseMicros += centeredAlt * ALT_CORR_MAX;
+        }
+        // Clamp base after altitude adjustment
+        if (baseMicros < MOTOR_IDLE)
+            baseMicros = MOTOR_IDLE;
+        if (baseMicros > MOTOR_MAX)
+            baseMicros = MOTOR_MAX;
     }
 
-    // Convert throttle to PWM range with better scaling
-    // Map 0-100% throttle to 1100-2000 PWM for proper response
-
-    int basePWM = mapFloat(baseThrottle, 0.0, 1.0, MOTOR_IDLE, MOTOR_MAX);
-
-    // Apply PID corrections with minimal adaptive scaling
-    // Keep PID scaling very close to 1.0 to preserve throttle response
-    float pidScale = 1.0;
-    if (baseThrottle > 0.30) // Start scaling at 30% throttle
+    // 2. Prepare control axes (manual inputs or PID outputs depending on mode)
+    float Rn = 0.0f, Pn = 0.0f, Yn = 0.0f;
+    if (flightState.mode == MODE_MANUAL)
     {
-        // Ultra-gentle curve: reduce from 100% at 30% to just 98% at 100% throttle
-        float scaleFactor = (baseThrottle - 0.30) / 0.70; // 0 to 1 range
-        pidScale = 1.0 - (scaleFactor * 0.02);            // Reduce by only 2% maximum
-        pidScale = constrainFloat(pidScale, 0.98, 1.0);
+        // Manual: use stick inputs directly normalized (already -1..1 expected)
+        // Roll sign: positive roll input tilts right; left roll increases right-side motors
+        Rn = constrainFloat((controlInputs.roll) * manualAxisGain, -1.0f, 1.0f);
+        Pn = constrainFloat(controlInputs.pitch * manualAxisGain, -1.0f, 1.0f);
+        Yn = constrainFloat(controlInputs.yaw * manualAxisGain, -1.0f, 1.0f);
+    }
+    else
+    {
+        // Stabilized modes: use PID outputs normalized by gains
+        Rn = constrainFloat((float)(rollPID.output / MIX_KR), -1.0f, 1.0f);
+        Pn = constrainFloat((float)(pitchPID.output / MIX_KP), -1.0f, 1.0f);
+        Yn = constrainFloat((float)(yawPID.output / MIX_KY), -1.0f, 1.0f);
     }
 
-    // Scale PID outputs from custom controllers
-    double scaledRollOutput = rollPID.output * pidScale;
-    double scaledPitchOutput = pitchPID.output * pidScale;
-    double scaledYawOutput = yawPID.output * pidScale;
+    // 3. Apply unified scaled mixing (handles saturation headroom automatically)
+    applyScaledMotorMix(baseMicros, Rn, Pn, Yn);
 
-    // X-configuration mixing:
-    // Motor 1 (Front Right CCW): +Roll, +Pitch, -Yaw
-    // Motor 2 (Back Right CW):   +Roll, -Pitch, +Yaw
-    // Motor 3 (Front Left CW):   -Roll, +Pitch, +Yaw
-    // Motor 4 (Back Left CCW):   -Roll, -Pitch, -Yaw
-
-    motorOutputs.motor1 = basePWM + scaledRollOutput + scaledPitchOutput - scaledYawOutput;
-    motorOutputs.motor2 = basePWM + scaledRollOutput - scaledPitchOutput + scaledYawOutput;
-    motorOutputs.motor3 = basePWM - scaledRollOutput + scaledPitchOutput + scaledYawOutput;
-    motorOutputs.motor4 = basePWM - scaledRollOutput - scaledPitchOutput - scaledYawOutput;
-
-    // Apply motor calibration offsets to compensate for mechanical imbalances
-    motorOutputs.motor1 += motorCal.motor1_offset;
-    motorOutputs.motor2 += motorCal.motor2_offset;
-    motorOutputs.motor3 += motorCal.motor3_offset;
-    motorOutputs.motor4 += motorCal.motor4_offset;
-
-    // Disabled motor saturation handling - causing throttle drops
-    // The PID corrections are already limited to ±200, so saturation shouldn't occur
-    // Let the final safety constraints handle any edge cases
-
-    // Final safety constraints
-    motorOutputs.motor1 = constrain(motorOutputs.motor1, MOTOR_MIN, MOTOR_MAX);
-    motorOutputs.motor2 = constrain(motorOutputs.motor2, MOTOR_MIN, MOTOR_MAX);
-    motorOutputs.motor3 = constrain(motorOutputs.motor3, MOTOR_MIN, MOTOR_MAX);
-    motorOutputs.motor4 = constrain(motorOutputs.motor4, MOTOR_MIN, MOTOR_MAX);
+    // 4. Apply motor calibration offsets AFTER mixing (applies to all modes).
+    // Manual mode already applies offsets in the manual path; stabilized uses this path via mixMotorOutputs.
+    motorOutputs.motor1 = constrain(motorOutputs.motor1 + (int)motorCal.motor1_offset, MOTOR_MIN, MOTOR_MAX);
+    motorOutputs.motor2 = constrain(motorOutputs.motor2 + (int)motorCal.motor2_offset, MOTOR_MIN, MOTOR_MAX);
+    motorOutputs.motor3 = constrain(motorOutputs.motor3 + (int)motorCal.motor3_offset, MOTOR_MIN, MOTOR_MAX);
+    motorOutputs.motor4 = constrain(motorOutputs.motor4 + (int)motorCal.motor4_offset, MOTOR_MIN, MOTOR_MAX);
 }
 
 void outputMotorCommands()
@@ -1912,19 +2206,19 @@ void setupWebServer()
             <div class="controls">
                 <div>
                     <h3>Motor 1 (Front Right CCW)</h3>
-                    <label>Offset: <input type="number" id="motor1_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor1_offset" value="0" step="1" min="-200" max="200" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 2 (Back Right CW)</h3>
-                    <label>Offset: <input type="number" id="motor2_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor2_offset" value="0" step="1" min="-200" max="200" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 3 (Front Left CW)</h3>
-                    <label>Offset: <input type="number" id="motor3_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor3_offset" value="0" step="1" min="-200" max="200" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 4 (Back Left CCW)</h3>
-                    <label>Offset: <input type="number" id="motor4_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor4_offset" value="0" step="1" min="-200" max="200" onchange="updateMotorCal()"></label>
                 </div>
             </div>
             <div style="text-align: center; margin-top: 15px;">
@@ -1956,6 +2250,41 @@ void setupWebServer()
                     <label>D: <input type="number" id="yaw_d" value="0.05" step="0.01" onchange="updatePID()"></label><br>
                 </div>
             </div>
+                        <hr>
+                        <h3>Mixer / Control Gains</h3>
+                        <div class="controls">
+                            <div>
+                                <label>Mix KR (Roll): <input type="number" id="mix_kr" value="200" step="5" onchange="updatePID()"></label><br>
+                                <label>Mix KP (Pitch): <input type="number" id="mix_kp" value="200" step="5" onchange="updatePID()"></label><br>
+                                <label>Mix KY (Yaw): <input type="number" id="mix_ky" value="150" step="5" onchange="updatePID()"></label><br>
+                            </div>
+                            <div>
+                                <label>Manual Axis Gain: <input type="number" id="manual_axis_gain" value="1.30" step="0.05" onchange="updatePID()"></label><br>
+                                <label>Throttle Gate: <input type="number" id="throttle_gate" value="0.35" step="0.01" min="0" max="1" onchange="updatePID()"></label><br>
+                                <label>Slew Roll/Pitch (deg/s): <input type="number" id="slew_rp" value="120" step="5" onchange="updatePID()"></label><br>
+                                <label>Slew Yaw Rate (deg/s/s): <input type="number" id="slew_yaw" value="720" step="10" onchange="updatePID()"></label><br>
+                                <label>Yaw Feed-Forward: <input type="number" id="yaw_ff" value="0.10" step="0.01" onchange="updatePID()"></label><br>
+                            </div>
+                        </div>
+                        <hr>
+                        <h3>Advanced: Fusion & Cascaded Control</h3>
+                        <div class="controls">
+                            <div>
+                                <label><input type="checkbox" id="use_kalman"> Use Kalman for Roll/Pitch</label><br>
+                                <label>Kalman Rate Std (deg/s): <input type="number" id="kalman_rate_std" value="4.0" step="0.5" onchange="updatePID()"></label><br>
+                                <label>Kalman Meas Std (deg): <input type="number" id="kalman_meas_std" value="3.0" step="0.5" onchange="updatePID()"></label><br>
+                            </div>
+                            <div>
+                                <label><input type="checkbox" id="use_cascaded"> Use Cascaded Angle→Rate</label><br>
+                                <label>Max Roll/Pitch Rate (deg/s): <input type="number" id="max_rp_rate" value="180" step="10" onchange="updatePID()"></label><br>
+                                <label>Rate Roll P: <input type="number" id="rate_roll_p" value="0.10" step="0.01" onchange="updatePID()"></label>
+                                <label>I: <input type="number" id="rate_roll_i" value="0.02" step="0.01" onchange="updatePID()"></label>
+                                <label>D: <input type="number" id="rate_roll_d" value="0.002" step="0.001" onchange="updatePID()"></label><br>
+                                <label>Rate Pitch P: <input type="number" id="rate_pitch_p" value="0.10" step="0.01" onchange="updatePID()"></label>
+                                <label>I: <input type="number" id="rate_pitch_i" value="0.02" step="0.01" onchange="updatePID()"></label>
+                                <label>D: <input type="number" id="rate_pitch_d" value="0.002" step="0.001" onchange="updatePID()"></label>
+                            </div>
+                        </div>
         </div>
         
         <!-- Flight Controller Debug Console -->
@@ -2119,7 +2448,26 @@ void setupWebServer()
                 pitch_d: parseFloat(document.getElementById('pitch_d').value),
                 yaw_p: parseFloat(document.getElementById('yaw_p').value),
                 yaw_i: parseFloat(document.getElementById('yaw_i').value),
-                yaw_d: parseFloat(document.getElementById('yaw_d').value)
+                yaw_d: parseFloat(document.getElementById('yaw_d').value),
+                mix_kr: parseFloat(document.getElementById('mix_kr').value),
+                mix_kp: parseFloat(document.getElementById('mix_kp').value),
+                mix_ky: parseFloat(document.getElementById('mix_ky').value),
+                manual_axis_gain: parseFloat(document.getElementById('manual_axis_gain').value),
+                throttle_gate: parseFloat(document.getElementById('throttle_gate').value),
+                slew_rp: parseFloat(document.getElementById('slew_rp').value),
+                slew_yaw: parseFloat(document.getElementById('slew_yaw').value),
+                yaw_ff: parseFloat(document.getElementById('yaw_ff').value),
+                use_kalman: document.getElementById('use_kalman').checked,
+                kalman_rate_std: parseFloat(document.getElementById('kalman_rate_std').value),
+                kalman_meas_std: parseFloat(document.getElementById('kalman_meas_std').value),
+                use_cascaded: document.getElementById('use_cascaded').checked,
+                max_rp_rate: parseFloat(document.getElementById('max_rp_rate').value),
+                rate_roll_p: parseFloat(document.getElementById('rate_roll_p').value),
+                rate_roll_i: parseFloat(document.getElementById('rate_roll_i').value),
+                rate_roll_d: parseFloat(document.getElementById('rate_roll_d').value),
+                rate_pitch_p: parseFloat(document.getElementById('rate_pitch_p').value),
+                rate_pitch_i: parseFloat(document.getElementById('rate_pitch_i').value),
+                rate_pitch_d: parseFloat(document.getElementById('rate_pitch_d').value)
             };
             
             fetch('/api/pid_update', {
@@ -2318,28 +2666,36 @@ void setupWebServer()
     // API: Control input endpoint
     server.on("/api/control", HTTP_POST, []()
               {
-        if (server.hasArg("plain")) {
-            StaticJsonDocument<256> doc;
-            deserializeJson(doc, server.arg("plain"));
-            
-            controlInputs.throttle = doc["throttle"];
-            controlInputs.roll = doc["roll"];
-            controlInputs.pitch = doc["pitch"];
-            controlInputs.yaw = doc["yaw"];
-            controlInputs.timestamp = millis();
-            
-            // Debug control inputs occasionally
-            static int control_debug_counter = 0;
-            if (++control_debug_counter >= 20) { // Every 20 calls (about 1 second)
-                control_debug_counter = 0;
-                Serial.printf("Web Control Input - Throttle: %.2f, Roll: %.2f, Pitch: %.2f, Yaw: %.2f\n",
-                              controlInputs.throttle, controlInputs.roll, controlInputs.pitch, controlInputs.yaw);
-            }
-            
-            server.send(200, "text/plain", "OK");
-        } else {
+        if (!server.hasArg("plain")) {
             server.send(400, "text/plain", "No data");
-        } });
+            return;
+        }
+        StaticJsonDocument<256> doc;
+        DeserializationError err = deserializeJson(doc, server.arg("plain"));
+        if (err) {
+            server.send(400, "text/plain", "Bad JSON");
+            return;
+        }
+        auto getNorm = [](JsonVariant v, float defVal, float minV, float maxV){
+            if (v.isNull()) return defVal;
+            float f = v.as<float>();
+            if (isnan(f)) return defVal;
+            if (f < minV) f = minV; else if (f > maxV) f = maxV;
+            return f;
+        };
+        controlInputs.throttle = getNorm(doc["throttle"], 0.0f, 0.0f, 1.0f);
+        controlInputs.roll     = getNorm(doc["roll"],     0.0f, -1.0f, 1.0f);
+        controlInputs.pitch    = getNorm(doc["pitch"],    0.0f, -1.0f, 1.0f);
+        controlInputs.yaw      = getNorm(doc["yaw"],      0.0f, -1.0f, 1.0f);
+        controlInputs.timestamp = millis();
+
+        static int control_debug_counter = 0;
+        if (++control_debug_counter >= 20) { // ~1s
+            control_debug_counter = 0;
+            Serial.printf("Web Control Input - Thr: %.2f R: %.2f P: %.2f Y: %.2f (gate %.2f)\n",
+                          controlInputs.throttle, controlInputs.roll, controlInputs.pitch, controlInputs.yaw, throttleGate);
+        }
+        server.send(200, "text/plain", "OK"); });
 
     // API: Arm motors
     server.on("/api/arm", HTTP_POST, []()
@@ -2384,7 +2740,7 @@ void setupWebServer()
     server.on("/api/pid_update", HTTP_POST, []()
               {
         if (server.hasArg("plain")) {
-            StaticJsonDocument<512> doc;
+            StaticJsonDocument<768> doc;
             deserializeJson(doc, server.arg("plain"));
             
             // Update PID parameters
@@ -2397,11 +2753,42 @@ void setupWebServer()
             pidParams.yaw_kp = doc["yaw_p"];
             pidParams.yaw_ki = doc["yaw_i"];
             pidParams.yaw_kd = doc["yaw_d"];
+            // Extended mixer / control constants (live tuning)
+            if (doc.containsKey("mix_kr")) MIX_KR = doc["mix_kr"]; 
+            if (doc.containsKey("mix_kp")) MIX_KP = doc["mix_kp"]; 
+            if (doc.containsKey("mix_ky")) MIX_KY = doc["mix_ky"]; 
+            if (doc.containsKey("manual_axis_gain")) manualAxisGain = doc["manual_axis_gain"].as<float>();
+            if (doc.containsKey("throttle_gate"))    throttleGate   = doc["throttle_gate"].as<float>();
+            if (doc.containsKey("slew_rp"))          slewRateRP     = doc["slew_rp"].as<float>();
+            if (doc.containsKey("slew_yaw"))         slewRateYaw    = doc["slew_yaw"].as<float>();
+            if (doc.containsKey("yaw_ff"))           yawFeedForward = doc["yaw_ff"].as<float>();
             
             // Apply to custom PID controllers
             rollPID.setTunings(pidParams.roll_kp, pidParams.roll_ki, pidParams.roll_kd);
             pitchPID.setTunings(pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd);
             yawPID.setTunings(pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd);
+            
+            // Advanced fusion/control toggles and parameters
+            if (doc.containsKey("use_kalman")) {
+                USE_KALMAN_ATTITUDE = doc["use_kalman"].as<bool>();
+            }
+            if (doc.containsKey("kalman_rate_std")) KALMAN_RATE_STD = doc["kalman_rate_std"].as<float>();
+            if (doc.containsKey("kalman_meas_std")) KALMAN_MEAS_STD = doc["kalman_meas_std"].as<float>();
+
+            if (doc.containsKey("use_cascaded")) {
+                USE_CASCADED_ANGLE_RATE = doc["use_cascaded"].as<bool>();
+            }
+            if (doc.containsKey("max_rp_rate")) MAX_ROLL_PITCH_RATE = doc["max_rp_rate"].as<float>();
+            if (doc.containsKey("rate_roll_p")) ratePidParams.roll_kp = doc["rate_roll_p"].as<double>();
+            if (doc.containsKey("rate_roll_i")) ratePidParams.roll_ki = doc["rate_roll_i"].as<double>();
+            if (doc.containsKey("rate_roll_d")) ratePidParams.roll_kd = doc["rate_roll_d"].as<double>();
+            if (doc.containsKey("rate_pitch_p")) ratePidParams.pitch_kp = doc["rate_pitch_p"].as<double>();
+            if (doc.containsKey("rate_pitch_i")) ratePidParams.pitch_ki = doc["rate_pitch_i"].as<double>();
+            if (doc.containsKey("rate_pitch_d")) ratePidParams.pitch_kd = doc["rate_pitch_d"].as<double>();
+
+            // Apply to inner rate PIDs
+            rollRatePID.setTunings(ratePidParams.roll_kp, ratePidParams.roll_ki, ratePidParams.roll_kd);
+            pitchRatePID.setTunings(ratePidParams.pitch_kp, ratePidParams.pitch_ki, ratePidParams.pitch_kd);
             
             Serial.println("PID parameters updated");
             server.send(200, "text/plain", "PID updated");

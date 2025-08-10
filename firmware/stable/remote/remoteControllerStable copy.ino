@@ -31,7 +31,7 @@
 #include <Adafruit_SSD1306.h>
 
 // Firebase configuration
-#define FIREBASE_HOST "https://skyforge-4606b-default-rtdb.asia-southeast1.firebasedatabase.app/"
+#define FIREBASE_HOST "skyforge-4606b-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define FIREBASE_AUTH "HBgETEJwFCsLswgXH2SuzYupJPWhJqWnJdfkFvGO"
 #define WIFI_SSID "Dialog 4G"
 #define WIFI_PASSWORD "0N7NT00ANTQ"
@@ -463,7 +463,7 @@ void setup()
 
     // Initialize safety states
     isArmed = false;
-    isStabilizedMode = true;  // Default to stabilized mode
+    isStabilizedMode = true; // Default to stabilized mode
     lastToggle1State = false;
     lastToggle2State = false;
 
@@ -479,11 +479,11 @@ void setup()
     }
 
     radio.openWritingPipe(address);
-    radio.setPALevel(RF24_PA_HIGH);  // Increased from PA_LOW to PA_HIGH for better range
-    radio.setDataRate(RF24_250KBPS); // Reduced from 1MBPS to 250KBPS for better range
-    radio.setChannel(76);
+    radio.setPALevel(RF24_PA_HIGH);  // High power for range
+    radio.setDataRate(RF24_250KBPS); // Keep 250kbps for robustness
+    radio.setChannel(110);           // Match drone channel, away from Wi-Fi
     radio.setAutoAck(true);
-    radio.setRetries(15, 15); // Maximum retries for reliability - PROVEN working configuration
+    radio.setRetries(3, 5); // Lower retry latency; rely on 50Hz updates
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -556,7 +556,7 @@ void loop()
     unsigned long currentTime = millis();
 
     // Send control data at 5Hz (200ms intervals) - PROVEN WORKING RATE
-    if (currentTime - lastControlSend >= 200)
+    if (currentTime - lastControlSend >= 20)
     {
         readJoystickInputs();
         sendControlData();
@@ -988,8 +988,18 @@ void initializeWiFi()
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
 
-        // Configure time for Firebase
+        // Configure time for Firebase and wait for sync (TLS needs correct time)
         configTime(0, 0, "pool.ntp.org");
+        time_t now = time(nullptr);
+        uint32_t waited = 0;
+        while (now < 1700000000 && waited < 5000)
+        {
+            delay(200);
+            waited += 200;
+            now = time(nullptr);
+        }
+        Serial.print("⏱ NTP time: ");
+        Serial.println((unsigned long)now);
     }
     else
     {

@@ -22,7 +22,7 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 - **Framework**: FreeRTOS with task-based scheduling ✅
 - **Servo Control**: Uses `ESP32Servo` library for PWM motor control ✅
 - **RF Communication**: NRF24L01 at 5Hz with ACK payload telemetry ✅
-- **Motor Control**: X-configuration mixing with toggle switch arming ✅
+- **Motor Control**: X-configuration mixing with dynamic saturation scaling (no pre-reserved headroom) ✅
 - **PID Controller**: `SimplePID` planned for implementation:
   - Roll stabilization (next priority)
   - Pitch stabilization (next priority)
@@ -42,12 +42,15 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 ---
 
-## ⬆️ Altitude Control
+## ⬆️ Altitude / Base Throttle Strategy
 
-- **Initial Lift-off Range**: Motors begin lift at ~1550–1600 µs PWM
+- **Lift-off Threshold**: Motors begin lifting frame at ~1550–1600 µs (battery dependent)
+- **Base Throttle Mapping**: User throttle always maps full idle→max range (no pre-reserved correction margin).
+- **Dynamic Mixer Scaling**: Differential roll/pitch/yaw corrections are scaled only when they would saturate an ESC output.
+- **Altitude Correction Overlay**: Altitude PID (0..1000) is centered to (−1..+1) and mapped to ±300 µs, added after base throttle mapping, then clamped.
 - **Altitude Source**:
-  - **Before GPS lock**: Use **BME280** barometric pressure
-  - **After GPS lock**: Use GPS-based altitude for better long-term stability
+  - Pre GPS lock: Barometric (BME280)
+  - After reliable GPS (≥4 sats): GPS altitude blending planned
 
 ---
 
@@ -66,7 +69,7 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 ## 🛠️ Development Notes
 
-- ✅ **ESC Control**: Motors respond to joystick inputs with X-configuration mixing
+- ✅ **ESC Control**: Motors respond to joystick inputs with X-configuration mixing and per-cycle dynamic scaling
 - ✅ **RF Communication**: 5Hz control loop with telemetry feedback operational
 - ✅ **Joystick Sensitivity**: Tuned to ±3000 range for precise flight control
 - ✅ **Safety Systems**: Toggle switch arming, emergency stop, control timeout protection
@@ -88,7 +91,48 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 - ✅ **Comprehensive telemetry system** - BME280, GPS, air quality sensors
 - ✅ **Joystick sensitivity tuning** - ±3000 range for precise control
 - ✅ **ESC calibration on power-on** - Immediate MAX→MIN calibration sequence
-- ⬜ **Implement PID stabilization** - Next critical milestone
+- ⬜ **Implement PID stabilization** - Next critical milestone (mixer path already unified)
+
+---
+
+## 🔄 Unified Scaled Motor Mixer (Technical Detail)
+
+Mix equations (normalized R,P,Y in [-1,1]):
+
+```
+M1 = -kR*R - kP*P + kY*Y   (Front Right CCW)
+M2 = -kR*R + kP*P - kY*Y   (Back  Right CW)
+M3 =  kR*R - kP*P - kY*Y   (Front Left  CW)
+M4 =  kR*R + kP*P + kY*Y   (Back  Left  CCW)
+```
+
+Scaling:
+
+1. posMax = max positive mix; negMin = most negative mix
+2. s_pos = min(1, (PWM_max - T)/posMax) if posMax>0
+3. s_neg = min(1, (T - PWM_min)/(-negMin)) if negMin<0
+4. Each motor = T + (m>=0 ? s_pos*m : s_neg*m)
+5. Clamp to [PWM_min, PWM_max]
+
+PID normalization:
+
+```
+Rn = clamp( rollPID / kR, -1, 1 )
+Pn = clamp( pitchPID / kP, -1, 1 )
+Yn = clamp( yawPID / kY, -1, 1 )
+```
+
+Advantages:
+
+- Full thrust retained until real saturation
+- Proportional axis balance preserved (no artificial clipping)
+- Eliminates guess-based headroom reservation
+
+Future Enhancements:
+
+- Telemetry export of s_pos / s_neg and raw mixes
+- Adaptive gain scheduling w.r.t battery voltage
+- Optional minimal reserved authority band for aggressive acro tuning
 - ⬜ **PID tuning with RF remote** - Real-time PID parameter adjustment
 - ⬜ **Add MPU6050 integration** - Gyro/accelerometer for stabilization
 - ⬜ **Add dynamic altitude hold and GPS switching logic**

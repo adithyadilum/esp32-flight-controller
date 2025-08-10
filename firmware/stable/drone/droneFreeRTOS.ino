@@ -541,6 +541,132 @@ volatile float pidPitchOutput = 0.0;
 volatile float pidYawOutput = 0.0;
 volatile float pidAltitudeOutput = 0.0;
 
+// ================================
+// QUADCOPTER MOTOR MIXING GAINS (tunable)
+// These gains represent the maximum microsecond contribution for full-scale (|R|=|P|=|Y|=1.0) inputs
+// Adjust to tune authority of each axis.
+// k_r: roll, k_p: pitch, k_y: yaw
+// Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
+float MIX_KR = 200.0f; // Roll gain (μs per full command)
+float MIX_KP = 200.0f; // Pitch gain (μs per full command)
+float MIX_KY = 150.0f; // Yaw gain (μs per full command)
+
+// PWM bounds (fallback to existing defines if present)
+#ifndef PWM_MIN_PULSE
+#define PWM_MIN_PULSE ESC_ARM_PULSE
+#endif
+#ifndef PWM_MAX_PULSE
+#define PWM_MAX_PULSE ESC_MAX_PULSE
+#endif
+
+// ================================
+// Scaled Motor Mixing Function (Implements user-specified algorithm)
+// Inputs:
+//   T = base throttle in microseconds (1000..2000)
+//   R, P, Y = normalized control inputs in range [-1.0, 1.0]
+// Output:
+//   Populates motorSpeeds[4] respecting bounds with dynamic scaling to prevent saturation
+// Motor Layout:
+//   M1 = Front Right (CCW) -> esc1 (GPIO 13)
+//   M2 = Back  Right (CW)  -> esc2 (GPIO 12)
+//   M3 = Front Left (CW)   -> esc3 (GPIO 14)
+//   M4 = Back  Left (CCW)  -> esc4 (GPIO 27)
+// Mixing (per requirement):
+//   M1 mix = -k_r*R - k_p*P + k_y*Y
+//   M2 mix = -k_r*R + k_p*P - k_y*Y
+//   M3 mix = +k_r*R - k_p*P - k_y*Y
+//   M4 mix = +k_r*R + k_p*P + k_y*Y
+// Dynamic scaling:
+//   posMax = max positive mix; negMin = most negative mix
+//   s_pos = min(1, (PWM_max - T)/posMax) if posMax>0 else 1
+//   s_neg = min(1, (T - PWM_min)/(-negMin)) if negMin<0 else 1
+//   final = T + s_pos*positive_mix + s_neg*negative_mix
+//   Clamp to [PWM_MIN_PULSE, PWM_MAX_PULSE]
+static inline void applyScaledMotorMix(float T, float R, float P, float Y)
+{
+    // Constrain base throttle
+    if (T < PWM_MIN_PULSE)
+        T = PWM_MIN_PULSE;
+    if (T > PWM_MAX_PULSE)
+        T = PWM_MAX_PULSE;
+
+    // Raw mixes (no throttle added yet)
+    float m1 = -MIX_KR * R - MIX_KP * P + MIX_KY * Y; // Front Right (CCW)
+    float m2 = -MIX_KR * R + MIX_KP * P - MIX_KY * Y; // Back Right (CW)
+    float m3 = MIX_KR * R - MIX_KP * P - MIX_KY * Y;  // Front Left (CW)
+    float m4 = MIX_KR * R + MIX_KP * P + MIX_KY * Y;  // Back Left (CCW)
+
+    // Determine scaling needed
+    float posMax = 0.0f;
+    float negMin = 0.0f;
+    if (m1 > posMax)
+        posMax = m1;
+    if (m1 < negMin)
+        negMin = m1;
+    if (m2 > posMax)
+        posMax = m2;
+    if (m2 < negMin)
+        negMin = m2;
+    if (m3 > posMax)
+        posMax = m3;
+    if (m3 < negMin)
+        negMin = m3;
+    if (m4 > posMax)
+        posMax = m4;
+    if (m4 < negMin)
+        negMin = m4;
+
+    float s_pos = 1.0f;
+    float s_neg = 1.0f;
+    if (posMax > 0.0f)
+    {
+        float headroomHigh = (float)PWM_MAX_PULSE - T;
+        if (headroomHigh < 0)
+            headroomHigh = 0;
+        s_pos = headroomHigh / posMax;
+        if (s_pos > 1.0f)
+            s_pos = 1.0f;
+    }
+    if (negMin < 0.0f)
+    {
+        float headroomLow = T - (float)PWM_MIN_PULSE;
+        if (headroomLow < 0)
+            headroomLow = 0;
+        s_neg = headroomLow / (-negMin);
+        if (s_neg > 1.0f)
+            s_neg = 1.0f;
+    }
+
+    // Apply scaled mixes
+    float f1 = T + (m1 >= 0 ? s_pos * m1 : s_neg * m1);
+    float f2 = T + (m2 >= 0 ? s_pos * m2 : s_neg * m2);
+    float f3 = T + (m3 >= 0 ? s_pos * m3 : s_neg * m3);
+    float f4 = T + (m4 >= 0 ? s_pos * m4 : s_neg * m4);
+
+    // Clamp and assign
+    if (f1 < PWM_MIN_PULSE)
+        f1 = PWM_MIN_PULSE;
+    if (f1 > PWM_MAX_PULSE)
+        f1 = PWM_MAX_PULSE;
+    if (f2 < PWM_MIN_PULSE)
+        f2 = PWM_MIN_PULSE;
+    if (f2 > PWM_MAX_PULSE)
+        f2 = PWM_MAX_PULSE;
+    if (f3 < PWM_MIN_PULSE)
+        f3 = PWM_MIN_PULSE;
+    if (f3 > PWM_MAX_PULSE)
+        f3 = PWM_MAX_PULSE;
+    if (f4 < PWM_MIN_PULSE)
+        f4 = PWM_MIN_PULSE;
+    if (f4 > PWM_MAX_PULSE)
+        f4 = PWM_MAX_PULSE;
+
+    motorSpeeds[0] = (int)f1; // Front Right (CCW)
+    motorSpeeds[1] = (int)f2; // Back Right (CW)
+    motorSpeeds[2] = (int)f3; // Front Left (CW)
+    motorSpeeds[3] = (int)f4; // Back Left (CCW)
+}
+
 // Function declarations
 void updateFlightMode();
 float getFilteredAltitude();
@@ -799,14 +925,18 @@ void sensorTask(void *parameter)
 void radioTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t radioFrequency = pdMS_TO_TICKS(200); // 5Hz radio check frequency
+    // Faster polling for lower latency
+    const TickType_t radioFrequency = pdMS_TO_TICKS(5); // 200Hz radio check frequency
 
     for (;;)
     {
         radioTaskCounter++;
 
-        // Check for incoming control data
-        handleControlData();
+        // Drain all incoming control data
+        while (radio.available())
+        {
+            handleControlData();
+        }
 
         // Wait for next cycle
         vTaskDelayUntil(&xLastWakeTime, radioFrequency);
@@ -852,9 +982,9 @@ void initializeRadio()
     radio.openReadingPipe(1, address);
     radio.setPALevel(RF24_PA_HIGH);  // Match remote power level
     radio.setDataRate(RF24_250KBPS); // Match remote data rate
-    radio.setChannel(76);
+    radio.setChannel(110);           // Away from Wi-Fi
     radio.setAutoAck(true);
-    radio.setRetries(15, 15);
+    radio.setRetries(3, 5); // Lower retry latency
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -1554,7 +1684,7 @@ void printStatus()
 
     Serial.print(", Motors: ");
     Serial.print(motorsArmed ? "ARMED" : "DISARMED");
-    
+
     // Show flight mode
     Serial.print(stabilizedMode ? " [STABILIZED]" : " [MANUAL]");
 
@@ -1668,9 +1798,9 @@ void calculateMotorSpeeds()
             if (receivedControl.toggle2 == 1)
             {
                 currentFlightMode = FLIGHT_MODE_STABILIZE;
-                pidEnabled = true; // Enable PID for stabilized mode
+                pidEnabled = true;     // Enable PID for stabilized mode
                 stabilizedMode = true; // Update status variable
-                
+
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
                     Serial.println("🔓 MOTORS ARMED - STABILIZED MODE ACTIVE (PID ON)");
@@ -1680,9 +1810,9 @@ void calculateMotorSpeeds()
             else
             {
                 currentFlightMode = FLIGHT_MODE_MANUAL;
-                pidEnabled = false; // Disable PID for manual mode
+                pidEnabled = false;     // Disable PID for manual mode
                 stabilizedMode = false; // Update status variable
-                
+
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
                     Serial.println("🔓 MOTORS ARMED - MANUAL MODE ACTIVE (PID OFF)");
@@ -1695,7 +1825,7 @@ void calculateMotorSpeeds()
             // Motors already armed - check for flight mode changes during flight
             static bool lastModeToggle = false;
             bool currentModeToggle = (receivedControl.toggle2 == 1);
-            
+
             if (currentModeToggle != lastModeToggle)
             {
                 if (currentModeToggle)
@@ -1704,7 +1834,7 @@ void calculateMotorSpeeds()
                     currentFlightMode = FLIGHT_MODE_STABILIZE;
                     pidEnabled = true;
                     stabilizedMode = true; // Update status variable
-                    
+
                     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                     {
                         Serial.println("🛡️ FLIGHT MODE: STABILIZED (PID ON)");
@@ -1717,7 +1847,7 @@ void calculateMotorSpeeds()
                     currentFlightMode = FLIGHT_MODE_MANUAL;
                     pidEnabled = false;
                     stabilizedMode = false; // Update status variable
-                    
+
                     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                     {
                         Serial.println("🎯 FLIGHT MODE: MANUAL (PID OFF)");
@@ -1771,10 +1901,10 @@ void calculateMotorSpeeds()
         return;
     }
 
-    // Convert throttle input to base throttle value
+    // Convert throttle input with full 2000μs range support and intelligent headroom management
     // Virtual Throttle Mode: Remote sends -3000 to +3000 where:
-    // -3000 = 0% power (minimum/idle), +3000 = 100% power (maximum)
-    // Map this to ESC pulse width range: ESC_ARM_PULSE (1000) to ~1600μs for safety
+    // -3000 = 0% power (minimum/idle), +3000 = 100% power (maximum = 2000μs when no control applied)
+    // When control inputs are active, base throttle is intelligently reduced to maintain differential control
 
     int throttleInput;
     int baseThrottle;
@@ -1787,10 +1917,36 @@ void calculateMotorSpeeds()
     }
     else
     {
-        // Map -3000 to +3000 range to 0 to 600 additional pulse width
-        // This gives us 1000μs (idle) to 1600μs (~80% throttle) for safety
-        throttleInput = map(receivedControl.throttle, -3000, 3000, 0, 600);
-        baseThrottle = ESC_ARM_PULSE + constrain(throttleInput, 0, 600);
+        if (currentFlightMode == FLIGHT_MODE_MANUAL)
+        {
+            // New scaled mixer handles saturation itself; give full 1000-2000 range directly
+            throttleInput = map(receivedControl.throttle, -3000, 3000, 0, (ESC_MAX_PULSE - ESC_ARM_PULSE));
+            baseThrottle = ESC_ARM_PULSE + constrain(throttleInput, 0, (ESC_MAX_PULSE - ESC_ARM_PULSE));
+        }
+        else
+        {
+            // Stabilized / altitude / future modes retain dynamic headroom reservation
+            int currentRollCorrection = 0;
+            int currentPitchCorrection = 0;
+            int currentYawCorrection = 0;
+
+            // Use actual PID outputs (thread-safe)
+            if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(2)) == pdTRUE)
+            {
+                currentRollCorrection = abs((int)pidRollOutput);
+                currentPitchCorrection = abs((int)pidPitchOutput);
+                currentYawCorrection = abs((int)pidYawOutput);
+                xSemaphoreGive(pidMutex);
+            }
+
+            int requiredHeadroom = currentRollCorrection + currentPitchCorrection + currentYawCorrection;
+            requiredHeadroom = (int)(requiredHeadroom * 1.1); // 10% margin
+            int maxSafeBaseThrottle = ESC_MAX_PULSE - requiredHeadroom;
+            maxSafeBaseThrottle = constrain(maxSafeBaseThrottle, ESC_ARM_PULSE, ESC_MAX_PULSE);
+            int availableThrottleRange = maxSafeBaseThrottle - ESC_ARM_PULSE;
+            throttleInput = map(receivedControl.throttle, -3000, 3000, 0, availableThrottleRange);
+            baseThrottle = ESC_ARM_PULSE + constrain(throttleInput, 0, availableThrottleRange);
+        }
     }
 
     // Get PID outputs (thread-safe)
@@ -1805,18 +1961,16 @@ void calculateMotorSpeeds()
     }
 
     // Motor mixing based on flight mode
+    bool usedScaledMixing = false; // Track if new scaled mixer used (skip extra limiting then)
     if (currentFlightMode == FLIGHT_MODE_MANUAL)
     {
-        // Manual mode - direct stick control (no PID)
-        int rollInput = map(receivedControl.roll, -3000, 3000, -200, 200); // Reduced range for manual
-        int pitchInput = map(receivedControl.pitch, -3000, 3000, -200, 200);
-        int yawInput = map(receivedControl.yaw, -3000, 3000, -150, 150);
-
-        // Standard X-configuration mixing
-        motorSpeeds[0] = baseThrottle + rollInput + pitchInput - yawInput; // Front Right (CCW)
-        motorSpeeds[1] = baseThrottle + rollInput - pitchInput + yawInput; // Back Right (CW)
-        motorSpeeds[2] = baseThrottle - rollInput + pitchInput + yawInput; // Front Left (CW)
-        motorSpeeds[3] = baseThrottle - rollInput - pitchInput - yawInput; // Back Left (CCW)
+        // Manual mode - use scaled mixer with dynamic saturation management
+        // Normalize stick inputs (-3000..3000) -> (-1.0 .. 1.0)
+        float Rn = constrain(receivedControl.roll / 3000.0f, -1.0f, 1.0f);
+        float Pn = constrain(receivedControl.pitch / 3000.0f, -1.0f, 1.0f);
+        float Yn = constrain(receivedControl.yaw / 3000.0f, -1.0f, 1.0f);
+        applyScaledMotorMix((float)baseThrottle, Rn, Pn, Yn);
+        usedScaledMixing = true;
     }
     else if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
     {
@@ -1836,27 +1990,69 @@ void calculateMotorSpeeds()
         motorSpeeds[3] = adjustedBaseThrottle - rollCorrection - pitchCorrection - yawCorrection; // Back Left (CCW)
     }
 
-    // Constrain motor speeds to safe range
-    for (int i = 0; i < 4; i++)
+    // Enhanced motor speed limiting only if legacy/direct mixing path used
+    if (!usedScaledMixing)
     {
-        motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+        // First constrain to basic range
+        for (int i = 0; i < 4; i++)
+        {
+            motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+        }
+
+        // Advanced safety: If any motor exceeds limits, use differential motor compensation
+        int maxMotorSpeed = max(max(motorSpeeds[0], motorSpeeds[1]), max(motorSpeeds[2], motorSpeeds[3]));
+        int minMotorSpeed = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+
+        if (maxMotorSpeed > ESC_MAX_PULSE)
+        {
+            int excess = maxMotorSpeed - ESC_MAX_PULSE;
+            for (int i = 0; i < 4; i++)
+            {
+                motorSpeeds[i] -= excess;
+                motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+            }
+        }
+
+        // Additional safety check - if any motor is still below minimum, bring all up proportionally
+        minMotorSpeed = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+        if (minMotorSpeed < ESC_ARM_PULSE)
+        {
+            int deficit = ESC_ARM_PULSE - minMotorSpeed;
+            for (int i = 0; i < 4; i++)
+            {
+                motorSpeeds[i] += deficit;
+                motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+            }
+        }
     }
 
-    // Enhanced debug output with throttle and motor information (less frequent to avoid overwhelming serial)
+    // Enhanced debug output with intelligent throttle management info (less frequent to avoid overwhelming serial)
     static unsigned long lastMotorDebug = 0;
     if (millis() - lastMotorDebug > 2000) // Every 2 seconds
     {
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
+            // Calculate current throttle percentage and control activity
+            int maxCurrentMotor = max(max(motorSpeeds[0], motorSpeeds[1]), max(motorSpeeds[2], motorSpeeds[3]));
+            int minCurrentMotor = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+            int throttlePercent = map(baseThrottle, ESC_ARM_PULSE, ESC_MAX_PULSE, 0, 100);
+            int controlActivity = maxCurrentMotor - minCurrentMotor; // Shows how much control authority is being used
+
             Serial.print("🚁 Motors: Armed:");
             Serial.print(motorsArmed ? "YES" : "NO");
             Serial.print(" | Throttle: Raw:");
             Serial.print(receivedControl.throttle);
-            Serial.print(" Mapped:");
-            Serial.print(throttleInput);
             Serial.print(" Base:");
             Serial.print(baseThrottle);
-            Serial.print(" | Speeds: [");
+            Serial.print("μs (");
+            Serial.print(throttlePercent);
+            Serial.print("%) | Motor Range: ");
+            Serial.print(minCurrentMotor);
+            Serial.print("-");
+            Serial.print(maxCurrentMotor);
+            Serial.print("μs | Control Activity:");
+            Serial.print(controlActivity);
+            Serial.print("μs | Speeds:[");
             Serial.print(motorSpeeds[0]);
             Serial.print(",");
             Serial.print(motorSpeeds[1]);

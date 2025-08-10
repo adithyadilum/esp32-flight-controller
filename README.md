@@ -82,7 +82,7 @@ esp32-flight-controller/
 ### 🎮 RF Remote Control System
 
 - **Direct joystick control** with dual analog joysticks
-- **X-configuration motor mixing** for precise quadcopter control
+- **X-configuration motor mixing** with dynamic saturation scaling (no pre-reserved headroom)
 - **5Hz control transmission** for responsive real-time control
 - **Toggle switch arming system** with flight mode switching (Stabilized/Manual)
 - **Flight mode control**: Stabilized mode with PID control and Manual mode for direct control
@@ -94,7 +94,9 @@ esp32-flight-controller/
 - **50Hz motor updates** for smooth ESC control
 - **Immediate ESC calibration** on power-up
 - **Safety systems** including control timeout and arming protection
-- **PID stabilization** with flight mode switching between Stabilized and Manual control
+- **Unified mixer algorithm**: Manual and PID modes both use full 1000–2000 µs throttle span; differential roll/pitch/yaw corrections are dynamically scaled only when they would saturate an ESC.
+- **No pre-reserved headroom**: Maximum lift always available; mixer computes per-cycle positive/negative scaling factors (s_pos / s_neg) to keep authority while preventing clipping.
+- **Altitude correction overlay**: Applied after throttle mapping (±300 µs window) and included in saturation scaling automatically.
 - **Dual flight modes**: Stabilized (PID-assisted) and Manual (direct control) modes
 
 ### 📡 Comprehensive Sensor Suite
@@ -343,9 +345,16 @@ float batteryVoltage = vOut * 5.0;         // Scale back to actual voltage
 
 ### Current Implementation
 
-- **Manual Mode**: Direct joystick control with motor mixing
+- **Manual Mode**: Direct joystick → mixer (full range) with dynamic saturation scaling
+- **Stabilized Mode**: PID outputs normalized by mixer gains (roll/pitch/yaw) → same mixer path for identical feel and authority
+- **Altitude Hold (in progress)**: Barometric altitude PID adds a symmetric ±300 µs base shift post throttle mapping
 - **Safety Systems**: Arming sequence and emergency stop
-- **Stability**: Basic motor mixing for quadcopter configuration
+- **Dynamic Scaling Details**:
+  - Raw mixes: M1 = -kR R - kP P + kY Y, M2 = -kR R + kP P - kY Y, M3 = +kR R - kP P - kY Y, M4 = +kR R + kP P + kY Y
+  - Compute posMax / negMin among mixes
+  - s_pos = min(1, (PWM_max - T) / posMax) ; s_neg = min(1, (T - PWM_min) / -negMin)
+  - Final motor = T + scaled mix (positive uses s_pos, negative uses s_neg)
+  - Ensures full available thrust while proportionally shrinking only the saturated side
 
 ### Planned Features (PID Integration)
 

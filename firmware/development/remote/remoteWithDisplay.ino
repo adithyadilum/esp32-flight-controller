@@ -18,7 +18,7 @@
  * - Comprehensive telemetry display and Firebase logging
  * - Manual throttle reset via joystick button
  *
- * ⚠️ EXPERIMENTAL - FOR DEVELOPMENT USE ONLY
+ * ⚠ EXPERIMENTAL - FOR DEVELOPMENT USE ONLY
  * Use stable_remote/remoteControllerStable.ino for production flights
  */
 
@@ -37,11 +37,11 @@
 #define WIFI_PASSWORD "0N7NT00ANTQ"
 
 // Upload frequency configuration (in milliseconds)
-#define FIREBASE_UPLOAD_INTERVAL 60000 // 60 seconds (conservative for stability)
-#define FIREBASE_ENABLED true          // Enabled with simple approach
+#define FIREBASE_UPLOAD_INTERVAL 5000 // 5 seconds (conservative for stability)
+#define FIREBASE_ENABLED true         // Enabled with simple approach
 
 // OLED Display Configuration - Set to false to completely disable OLED functionality
-#define OLED_ENABLED false // Set to false to disable OLED display functionality for now
+#define OLED_ENABLED true // Set to true to enable OLED display functionality
 
 // Common testing intervals:
 // 10000  = 10 seconds (normal)
@@ -143,7 +143,7 @@ bool displayAvailable = false; // Track if OLED display is working
 
 void scanI2CDevices()
 {
-    Serial.println("🔍 Scanning I2C bus for devices...");
+    Serial.println(" Scanning I2C bus for devices...");
     delay(100); // Give I2C devices time to initialize
 
     int deviceCount = 0;
@@ -172,14 +172,15 @@ void scanI2CDevices()
         }
         else if (error == 4)
         {
-            Serial.print("⚠️  Unknown error at address 0x");
+            Serial.print("⚠  Unknown error at address 0x");
             if (address < 16)
                 Serial.print("0");
             Serial.print(address, HEX);
             Serial.println(" (error code 4)");
         }
 
-        delay(2); // Small delay between addresses for reliability
+        // Skip extra per-address delay to speed up boot
+        // delay(2); // Small delay between addresses for reliability
     }
 
     Serial.println("────────────────────────────────");
@@ -202,10 +203,142 @@ void scanI2CDevices()
         }
         else
         {
-            Serial.println("⚠️  No OLED display found at 0x3C or 0x3D");
+            Serial.println("⚠  No OLED display found at 0x3C or 0x3D");
         }
     }
     Serial.println("I2C scan complete\n");
+}
+
+// Helper: build a moving wave string like ".:::" with given width and phase
+static void buildWave(char *buf, uint8_t width, uint8_t phase)
+{
+    for (uint8_t i = 0; i < width; i++)
+        buf[i] = ':';
+    buf[phase % width] = '.';
+    buf[width] = '\0';
+}
+
+// Startup marquee: big scrolling "SKY FORGE" text (size 4)
+static void showStartupMarquee()
+{
+    if (!displayAvailable)
+        return;
+
+    // Compute scale so both "SKY" (top-left) and "FORGE" (bottom-right) fit
+    const int baseCharW = 6;
+    const int baseCharH = 8;
+    const char *wordTop = "SKY";
+    const char *wordBottom = "FORGE";
+    const int lenTop = 3;
+    const int lenBottom = 5;
+
+    // Avoid any wrapped artifacts during animation
+    display.setTextWrap(false);
+
+    int scale = 4; // prefer 4 if it fits
+    auto fitsAtScale = [&](int sc)
+    {
+        int charW = baseCharW * sc;
+        int charH = baseCharH * sc;
+        int topW = lenTop * charW;
+        int botW = lenBottom * charW;
+        bool horizOK = (topW <= SCREEN_WIDTH) && (botW <= SCREEN_WIDTH);
+        bool vertOK = (2 * charH) <= SCREEN_HEIGHT; // two rows (top and bottom)
+        return horizOK && vertOK;
+    };
+
+    if (!fitsAtScale(scale))
+        scale = 3; // fallback to 3 if 4 doesn't fit
+
+    const int charW = baseCharW * scale;
+    const int charH = baseCharH * scale;
+
+    // Final anchored positions
+    const int skyFinalX = 0;
+    const int skyFinalY = 0;
+    const int topW = lenTop * charW;
+    const int forgeW = lenBottom * charW;
+    const int forgeH = charH;
+    const int forgeFinalX = SCREEN_WIDTH - forgeW;
+    const int forgeFinalY = SCREEN_HEIGHT - forgeH;
+
+    // Start positions (off-screen)
+    // SKY: slide in horizontally from the left at the top row
+    const int skyStartX = -topW;
+    const int skyStartY = skyFinalY;
+    // FORGE: slide in horizontally from the right at the bottom row
+    const int forgeStartX = SCREEN_WIDTH;
+    const int forgeStartY = forgeFinalY;
+
+    // Animation frames based on max distance either word must travel
+    int skyDx = abs(skyStartX - skyFinalX);
+    int skyDy = abs(skyStartY - skyFinalY);
+    int forgeDx = abs(forgeStartX - forgeFinalX);
+    int forgeDy = abs(forgeStartY - forgeFinalY);
+    int maxDist = max(max(skyDx, skyDy), max(forgeDx, forgeDy));
+    // Step multiple pixels per frame to cut total frames significantly
+    int stepPx = max(8, charW / 2);
+    int frames = max(1, (maxDist + stepPx - 1) / stepPx);
+
+    // Time-budget the animation to last ~1.5 seconds total
+    const unsigned long targetAnimMs = 1500UL;
+    unsigned long perFrameBudget = max(1UL, targetAnimMs / (unsigned long)max(1, frames));
+    unsigned long nextDeadline = millis();
+
+    for (int i = 0; i <= frames; ++i)
+    {
+        int skyX = skyStartX + (skyFinalX - skyStartX) * i / frames;
+        int skyY = skyStartY + (skyFinalY - skyStartY) * i / frames;
+
+        int forgeX = forgeStartX + (forgeFinalX - forgeStartX) * i / frames;
+        int forgeY = forgeStartY + (forgeFinalY - forgeStartY) * i / frames;
+
+        display.clearDisplay();
+        display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(scale);
+
+        // Draw SKY at its current position
+        display.setCursor(skyX, skyY);
+        display.print(wordTop);
+
+        // Draw FORGE at its current position
+        display.setCursor(forgeX, forgeY);
+        display.print(wordBottom);
+
+        display.display();
+
+        // Pace to meet the per-frame budget, absorbing drawing time
+        unsigned long now = millis();
+        unsigned long deadline = nextDeadline + perFrameBudget;
+        if (now < deadline)
+        {
+            delay(deadline - now);
+        }
+        nextDeadline = deadline;
+    }
+
+    // Hold both words in place for 1 second
+    {
+        unsigned long holdStart = millis();
+        while (millis() - holdStart < 1000)
+        {
+            display.clearDisplay();
+            display.setTextColor(SSD1306_WHITE);
+            display.setTextSize(scale);
+
+            display.setCursor(skyFinalX, skyFinalY);
+            display.print(wordTop);
+
+            display.setCursor(forgeFinalX, forgeFinalY);
+            display.print(wordBottom);
+
+            display.display();
+            delay(10);
+        }
+    }
+
+    // After the SKY/FORGE hold, proceed directly to main screen
+    return;
 }
 
 void updateOLEDDisplay()
@@ -240,7 +373,7 @@ void updateOLEDDisplay()
         static unsigned long lastErrorMessage = 0;
         if (millis() - lastErrorMessage > 10000) // Print message every 10 seconds
         {
-            Serial.println("⚠️  OLED Display temporarily disabled due to I2C errors");
+            Serial.println("  OLED Display temporarily disabled due to I2C errors");
             Serial.println("   Will auto-retry in a few seconds...");
             lastErrorMessage = millis();
         }
@@ -264,41 +397,257 @@ void updateOLEDDisplay()
 
         // Clear and prepare display
         display.clearDisplay();
-        display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
+        // We'll control positions manually to add spacing and adjust sizes
 
-        // Display content
-        display.println("DRONE CONTROLLER");
-        display.println("================");
+        // --- Animated waves and status determination ---
+        static uint8_t phase4 = 0; // for 4-char waves (WiFi/NRF)
+        static uint8_t phase3 = 0; // retained (unused for Recv/Up now)
+        phase4 = (phase4 + 1) % 4;
+        phase3 = (phase3 + 1) % 3;
 
-        // Display ARM/DISARM status
-        if (isArmed)
+        char wave4[5]; // e.g., ".:::" for WiFi/NRF
+        char wave3[4]; // legacy 3-char wave (kept for compatibility if needed)
+        buildWave(wave4, 4, phase4);
+        buildWave(wave3, 3, phase3);
+
+        // Custom patterns for Recv (6 frames) and Up (7 frames)
+        static uint8_t phaseRecv = 0;
+        static uint8_t phaseUp = 0;
+        phaseRecv = (phaseRecv + 1) % 5;
+        phaseUp = (phaseUp + 1) % 6;
+
+        char recvPat[4];
+        char upPat[4];
+        // Recv sequence: ":::", ":: ", ":  ", "  :", " ::"
+        switch (phaseRecv)
         {
-            display.println("STATUS: ARMED");
+        case 0:
+            strncpy(recvPat, ":::", 4);
+            break;
+        case 1:
+            strncpy(recvPat, ":: ", 4);
+            break;
+        case 2:
+            strncpy(recvPat, ":  ", 4);
+            break;
+        case 3:
+            strncpy(recvPat, "  :", 4);
+            break;
+        case 4:
+            strncpy(recvPat, " ::", 4);
+            break;
         }
-        else
+        // Up sequence: ":::", " ::", "  :", "   ", ":", ":: "
+        switch (phaseUp)
         {
-            display.println("STATUS: DISARMED");
+        case 0:
+            strncpy(upPat, ":::", 4);
+            break;
+        case 1:
+            strncpy(upPat, " ::", 4);
+            break;
+        case 2:
+            strncpy(upPat, "  :", 4);
+            break;
+        case 3:
+            strncpy(upPat, "   ", 4);
+            break;
+        case 4:
+            strncpy(upPat, ":", 4);
+            break;
+        case 5:
+            strncpy(upPat, ":: ", 4);
+            break;
         }
 
-        // Display control values
-        display.println();
-        display.printf("T:%4d(%2d%%) Y:%4d\n",
-                       virtualThrottle,
-                       (virtualThrottle * 100) / 3000,
-                       controlData.yaw);
-        display.printf("R:%4d  P:%4d\n", controlData.roll, controlData.pitch);
+        // Track recent NRF/telemetry activity using existing counters
+        static int lastSuccessCount = -1;
+        static unsigned long lastRFActivity = 0;
+        static int lastTelemetryCountSeen = -1;
+        static unsigned long lastTelemetryActivity = 0;
 
-        // Display connection status
-        display.println();
-        if (telemetryReceived)
+        unsigned long now = millis();
+        if (successCount != lastSuccessCount)
         {
-            display.println("CONN: OK");
+            lastSuccessCount = successCount;
+            lastRFActivity = now;
         }
-        else
+        if (telemetryCount != lastTelemetryCountSeen)
         {
-            display.println("CONN: LOST");
+            lastTelemetryCountSeen = telemetryCount;
+            lastTelemetryActivity = now;
+        }
+
+        bool wifiOk = (WiFi.status() == WL_CONNECTED);       // use live WiFi status
+        bool nrfOk = (now - lastRFActivity) <= 3000;         // recent successful radio write
+        bool recvOk = (now - lastTelemetryActivity) <= 3000; // recent telemetry
+        bool upOk = (wifiConnected && firebaseReady);        // upload readiness (no timestamp available)
+
+        // Read live joystick values for display (independent of arm state)
+        int joy1_x_disp = analogRead(JOY1_X_PIN);
+        int joy2_x_disp = analogRead(JOY2_X_PIN);
+        int joy2_y_disp = analogRead(JOY2_Y_PIN);
+        int16_t yawDisp = map(joy1_x_disp, 0, 4095, -3000, 3000);
+        int16_t rollDisp = map(joy2_x_disp, 0, 4095, -3000, 3000);
+        int16_t pitchDisp = map(joy2_y_disp, 0, 4095, -3000, 3000);
+        yawDisp = (abs(yawDisp) < CONTROL_DEADZONE) ? 0 : yawDisp;
+        rollDisp = (abs(rollDisp) < CONTROL_DEADZONE) ? 0 : rollDisp;
+        pitchDisp = (abs(pitchDisp) < CONTROL_DEADZONE) ? 0 : pitchDisp;
+
+        // Manual layout with spacing and slightly larger header
+        int y = 0;
+
+        // Helper lambdas for centering the '|' at screen middle
+        const int xCenter = SCREEN_WIDTH / 2;
+        auto charWidth = [](int scale)
+        { return 6 * scale; };
+        auto strLen = [](const char *s)
+        {
+            int n = 0;
+            while (*s++)
+                n++;
+            return n;
+        };
+
+        // --- Line 1: Arm | Mode (larger text) ---
+        {
+            const int scale = 1;
+            const int cW = charWidth(scale);
+            const char *leftText = isArmed ? "Armed" : "Disarmed";
+            const char *rightText = isStabilizedMode ? "Automatic" : "Manual";
+
+            int leftW = strLen(leftText) * cW;
+            int basePipeLeftX = xCenter - (cW / 2);
+            int minPipeX = leftW + cW; // ensure space between left and pipe
+            int pipeLeftX = (basePipeLeftX < minPipeX) ? minPipeX : basePipeLeftX;
+
+            int leftStartX = 0; // anchor left label to the left edge
+
+            display.setTextSize(scale);
+            display.setCursor(leftStartX, y);
+            display.print(leftText);
+            display.print(' ');
+            display.setCursor(pipeLeftX, y);
+            display.print('|');
+            display.print(' ');
+            display.print(rightText);
+        }
+
+        y += 14; // keep existing spacing
+
+        // --- Line 2: WIFI and NRF ---
+        {
+            const int scale = 1;
+            const int cW = charWidth(scale);
+            int basePipeLeftX = xCenter - (cW / 2);
+
+            // Left: "WIFI " + (wave4 or '!')
+            const char *lPrefix = "WIFI ";
+            int lLen = 5 + (wifiOk ? 4 : 1);
+            int leftW = lLen * cW;
+            int minPipeX = leftW + cW;
+            int pipeLeftX = (basePipeLeftX < minPipeX) ? minPipeX : basePipeLeftX;
+            int leftStartX = 0; // anchor left label to the left edge
+
+            display.setTextSize(scale);
+            display.setCursor(leftStartX, y);
+            display.print(lPrefix);
+            if (wifiOk)
+                display.print(wave4);
+            else
+                display.print("!");
+            display.print(' ');
+            display.setCursor(pipeLeftX, y);
+            display.print('|');
+            display.print(' ');
+            display.print("NRF ");
+            if (nrfOk)
+                display.print(wave4);
+            else
+                display.print("!");
+        }
+
+        y += 12; // keep existing spacing
+
+        // --- Line 3: Recv and Up ---
+        {
+            const int scale = 1;
+            const int cW = charWidth(scale);
+            int basePipeLeftX = xCenter - (cW / 2);
+
+            // Left: "Recv " + (wave3 or '!')
+            const char *lPrefix = "Recv ";
+            int lLen = 5 + (recvOk ? 3 : 1);
+            int leftW = lLen * cW;
+            int minPipeX = leftW + cW;
+            int pipeLeftX = (basePipeLeftX < minPipeX) ? minPipeX : basePipeLeftX;
+            int leftStartX = 0; // anchor left label to the left edge
+
+            display.setTextSize(scale);
+            display.setCursor(leftStartX, y);
+            display.print(lPrefix);
+            if (recvOk)
+                display.print(recvPat);
+            else
+                display.print("!");
+            display.print(' ');
+            display.setCursor(pipeLeftX, y);
+            display.print('|');
+            display.print(' ');
+            display.print("Up ");
+            if (upOk)
+                display.print(upPat);
+            else
+                display.print("!");
+        }
+
+        y += 16; // add spacing between lines
+
+        // --- Line 4: Throttle and Pitch (swapped placement) ---
+        // Left: T at x=0; Right: Y aligned with right-hand column
+        display.setTextSize(1); // keep size 1 here to fit width reliably
+        display.setCursor(0, y);
+        display.printf("T:%4d", controlData.throttle);
+
+        // Compute right-hand column X (aligned with lines 2/3 right content)
+        {
+            const int scaleR = 1;
+            const int cWR = charWidth(scaleR);
+            int basePipeLeftX = xCenter - (cWR / 2);
+            // Consider both line 2 (WIFI...) and line 3 (Recv...) left widths
+            int minPipeX2 = (5 + (wifiOk ? 4 : 1)) * cWR + cWR; // "WIFI " + wave4/!
+            int minPipeX3 = (5 + (recvOk ? 3 : 1)) * cWR + cWR; // "Recv " + wave3/!
+            int pipeL2 = (basePipeLeftX < minPipeX2) ? minPipeX2 : basePipeLeftX;
+            int pipeL3 = (basePipeLeftX < minPipeX3) ? minPipeX3 : basePipeLeftX;
+            int pipeLX = (pipeL2 > pipeL3) ? pipeL2 : pipeL3;
+            int rightColX = pipeLX + 2 * cWR; // after '|' and a space
+
+            display.setCursor(rightColX, y);
+            display.printf("P:%4d", pitchDisp);
+        }
+
+        y += 12; // add spacing between lines
+
+        // --- Line 5: Yaw and Roll (swapped placement) ---
+        // Left: Y at x=0; Right: R aligned with right-hand column
+        display.setCursor(0, y);
+        display.setTextSize(1);
+        display.printf("Y:%4d", yawDisp);
+
+        {
+            const int scaleR = 1;
+            const int cWR = charWidth(scaleR);
+            int basePipeLeftX = xCenter - (cWR / 2);
+            int minPipeX2 = (5 + (wifiOk ? 4 : 1)) * cWR + cWR;
+            int minPipeX3 = (5 + (recvOk ? 3 : 1)) * cWR + cWR;
+            int pipeL2 = (basePipeLeftX < minPipeX2) ? minPipeX2 : basePipeLeftX;
+            int pipeL3 = (basePipeLeftX < minPipeX3) ? minPipeX3 : basePipeLeftX;
+            int pipeLX = (pipeL2 > pipeL3) ? pipeL2 : pipeL3;
+            int rightColX = pipeLX + 2 * cWR;
+
+            display.setCursor(rightColX, y);
+            display.printf("R:%4d", rollDisp);
         }
 
         // Try to update the physical display with I2C error checking
@@ -322,7 +671,7 @@ void updateOLEDDisplay()
             displayErrorCount++;
             if (displayErrorCount <= maxDisplayErrors)
             {
-                Serial.printf("⚠️  OLED I2C error (attempt %d/%d, error count: %d, I2C error: %d)\n",
+                Serial.printf("⚠  OLED I2C error (attempt %d/%d, error count: %d, I2C error: %d)\n",
                               attempts, maxAttempts, displayErrorCount, i2cError);
             }
         }
@@ -338,7 +687,8 @@ void updateOLEDDisplay()
 void setup()
 {
     Serial.begin(115200);
-    delay(1000);
+    // Shorter serial warm-up for faster boot
+    delay(200);
 
     Serial.println("=== Complete Remote Controller - Stable Version ===");
     Serial.println("Compatible with droneFreeRTOS.ino");
@@ -347,16 +697,16 @@ void setup()
 #if OLED_ENABLED
     Serial.println("🔧 Initializing I2C for OLED display...");
     Wire.begin(21, 22);    // SDA=21, SCL=22 (ESP32 default)
-    Wire.setClock(100000); // Set I2C clock to 100kHz for better reliability
+    Wire.setClock(400000); // Speed up I2C to 400kHz for faster display updates
     delay(200);            // Give I2C time to stabilize
 
-    Serial.println("📍 I2C initialized - SDA:GPIO21, SCL:GPIO22, Clock:100kHz");
+    Serial.println("📍 I2C initialized - SDA:GPIO21, SCL:GPIO22, Clock:400kHz");
 
     // Scan for I2C devices first
     scanI2CDevices();
 
     // Initialize OLED Display with comprehensive error handling
-    Serial.println("🖥️  Initializing OLED Display...");
+    Serial.println("🖥  Initializing OLED Display...");
     delay(100); // Additional delay before display initialization
 
     // Try multiple initialization attempts
@@ -413,29 +763,28 @@ void setup()
         Serial.println("   2. Verify display specifications (0.96\" SSD1306)");
         Serial.println("   3. Check if display requires different I2C address");
         Serial.println("   4. Ensure pull-up resistors on SDA/SCL (usually built-in)");
-        Serial.println("⚠️  Continuing without display - drone control will work normally");
+        Serial.println("⚠  Continuing without display - drone control will work normally");
         displayAvailable = false;
     }
     else
     {
-        // Show startup message if display is available
-        Serial.println("🎉 Testing OLED display functionality...");
+        Serial.println("✅ OLED display ready");
+        // Ensure the panel starts from a clean state and no wrapped text
         display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
-        display.println(F("DRONE CONTROLLER"));
-        display.println(F("================"));
-        display.println(F("System: ONLINE"));
-        display.println(F("Display: OK"));
-        display.println(F("Initializing..."));
+        display.display();
+        delay(20);
+        display.setTextWrap(false);
 
-        display.display(); // This function returns void
-        Serial.println("✅ OLED display test successful!");
-        delay(2000); // Show startup message for 2 seconds
+        // Start animation immediately on power-up
+        Serial.println("🎉 Startup animation...");
+        showStartupMarquee();
+        Serial.println("✅ Startup animation done");
+
+        // Draw initial values screen right away (before WiFi/Firebase)
+        updateOLEDDisplay();
     }
 #else
-    Serial.println("⚠️  OLED Display disabled in configuration");
+    Serial.println("⚠  OLED Display disabled in configuration");
     Serial.println("💡 System optimized for drone control without display");
     displayAvailable = false;
 #endif // Initialize pins
@@ -509,6 +858,8 @@ void setup()
         Serial.println("Firebase disabled - running in offline mode");
     }
 
+    // Startup animation already shown immediately after OLED init
+
     Serial.print("Starting PROVEN control transmission (5Hz) with virtual throttle mode");
     if (FIREBASE_ENABLED)
     {
@@ -546,7 +897,7 @@ void setup()
     Serial.println("Radio Configuration:");
     Serial.print("  Power Level: RF24_PA_HIGH");
     Serial.print(", Data Rate: RF24_250KBPS");
-    Serial.print(", Channel: 110");
+    Serial.print(", Channel: 76");
     Serial.print(", CRC: 16-bit");
     Serial.println(", Address Width: 5 bytes");
 }
@@ -811,7 +1162,7 @@ void printTelemetryData()
     // === FLIGHT MODE STATUS ===
     Serial.print(" | Mode: ");
     if (isStabilizedMode)
-        Serial.print("�️STAB");
+        Serial.print(" STAB");
     else
         Serial.print("🎯MAN");
 
@@ -848,7 +1199,7 @@ void printTelemetryData()
     Serial.println(); // End control line
 
     // === ENVIRONMENTAL DATA LINE ===
-    Serial.print("🌡️  Environment: ");
+    Serial.print("🌡  Environment: ");
     Serial.print("Temp:");
     Serial.print(telemetryData.temperature / 100.0, 1);
     Serial.print("°C | Press:");
@@ -881,7 +1232,7 @@ void printTelemetryData()
     Serial.println();
 
     // === AIR QUALITY LINE ===
-    Serial.print("🌬️  Air Quality: ");
+    Serial.print("🌬  Air Quality: ");
     Serial.print("Light:");
     Serial.print(telemetryData.lux);
     Serial.print("lx | UV:");
@@ -934,10 +1285,10 @@ void printStatusReport()
     Serial.println();
 
     // === SAFETY STATUS ===
-    Serial.print("🛡️  Safety: ");
+    Serial.print("🛡  Safety: ");
     Serial.print(isArmed ? "🔓ARMED" : "🔒DISARMED");
     Serial.print(" | Flight Mode: ");
-    Serial.print(isStabilizedMode ? "�️STABILIZED" : "🎯MANUAL");
+    Serial.print(isStabilizedMode ? " STABILIZED" : "🎯MANUAL");
     Serial.println();
 
     // === VIRTUAL THROTTLE STATUS ===
@@ -988,14 +1339,15 @@ void initializeWiFi()
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
 
-        // Configure time for Firebase and wait for sync (TLS needs correct time)
+        // Configure time for Firebase
         configTime(0, 0, "pool.ntp.org");
+        // Wait briefly for time to sync (needed for TLS)
         time_t now = time(nullptr);
-        uint32_t waited = 0;
-        while (now < 1700000000 && waited < 5000)
+        uint32_t waitMs = 0;
+        while (now < 1700000000 && waitMs < 5000) // ~2023-11-14 epoch threshold
         {
             delay(200);
-            waited += 200;
+            waitMs += 200;
             now = time(nullptr);
         }
         Serial.print("⏱ NTP time: ");
@@ -1143,7 +1495,7 @@ void handleSafetyToggleSwitches()
         if (controlData.toggle2 == 1) // Toggle 2 turned ON
         {
             isStabilizedMode = true;
-            Serial.println("�️  FLIGHT MODE: STABILIZED - Auto-leveling enabled");
+            Serial.println("   FLIGHT MODE: STABILIZED - Auto-leveling enabled");
         }
         else // Toggle 2 turned OFF
         {
