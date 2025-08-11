@@ -626,9 +626,9 @@ volatile float pidAltitudeOutput = 0.0;
 // Adjust to tune authority of each axis.
 // k_r: roll, k_p: pitch, k_y: yaw
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
-float MIX_KR = 200.0f; // Roll gain (μs per full command)
-float MIX_KP = 200.0f; // Pitch gain (μs per full command)
-float MIX_KY = 150.0f; // Yaw gain (μs per full command)
+float MIX_KR = 100.0f; // Roll gain (μs per full command)
+float MIX_KP = 100.0f; // Pitch gain (μs per full command)
+float MIX_KY = 75.0f; // Yaw gain (μs per full command)
 
 // ================================
 // MOTOR CALIBRATION OFFSETS (μs)
