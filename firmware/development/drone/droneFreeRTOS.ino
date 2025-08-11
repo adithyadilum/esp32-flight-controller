@@ -630,6 +630,30 @@ float MIX_KR = 200.0f; // Roll gain (μs per full command)
 float MIX_KP = 200.0f; // Pitch gain (μs per full command)
 float MIX_KY = 150.0f; // Yaw gain (μs per full command)
 
+// ================================
+// MOTOR CALIBRATION OFFSETS (μs)
+// Adjust these constants to fine-tune hover balance or counter small frame / motor / ESC mismatches.
+// Positive values INCREASE that motor's output. Keep within roughly ±50 for initial tuning.
+// Motor layout reference:
+//   M1 = Front Right  (CCW)
+//   M2 = Back  Right  (CW)
+//   M3 = Front Left   (CW)
+//   M4 = Back  Left   (CCW)
+// Example: If the quad drifts forward-right, you may slightly raise rear-left (M4) or lower front-right (M1).
+// NOTE: These are compile-time constants; change and rebuild to apply.
+#ifndef MOTOR1_OFFSET_US
+#define MOTOR1_OFFSET_US 0
+#endif
+#ifndef MOTOR2_OFFSET_US
+#define MOTOR2_OFFSET_US 0
+#endif
+#ifndef MOTOR3_OFFSET_US
+#define MOTOR3_OFFSET_US 0
+#endif
+#ifndef MOTOR4_OFFSET_US
+#define MOTOR4_OFFSET_US 0
+#endif
+
 // PWM bounds (fallback to existing defines if present)
 #ifndef PWM_MIN_PULSE
 #define PWM_MIN_PULSE ESC_ARM_PULSE
@@ -638,15 +662,7 @@ float MIX_KY = 150.0f; // Yaw gain (μs per full command)
 #define PWM_MAX_PULSE ESC_MAX_PULSE
 #endif
 
-// ================================
-// Motor Calibration Offsets (μs)
-// Apply small per-motor corrections to compensate hardware imbalances.
-// Positive values increase that motor's command; defaults zero.
-// Applied AFTER mixing in all modes (manual and stabilized), same as v2.
-int MOTOR1_OFFSET_US = 0; // Front Right (CCW)
-int MOTOR2_OFFSET_US = 0; // Back  Right (CW)
-int MOTOR3_OFFSET_US = 0; // Front Left  (CW)
-int MOTOR4_OFFSET_US = 0; // Back  Left  (CCW)
+// (Runtime-adjustable motor offset variables removed in favor of compile-time constants above.)
 
 // ================================
 // Scaled Motor Mixing Function (Implements user-specified algorithm)
@@ -2094,6 +2110,8 @@ void calculateMotorSpeeds()
 // Latency-optimized variant using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
+    // Track previous state of toggle2 for edge detection (stabilize/manual) across calls
+    static bool lastModeToggle = false; // reflects last observed (receivedControl.toggle2==1) while armed
     // Check if motors should be armed (toggle switch 1 controls arming)
     if (receivedControl.toggle1 == 1)
     {
@@ -2128,11 +2146,12 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
                     xSemaphoreGive(serialMutex);
                 }
             }
+            // IMPORTANT: initialize lastModeToggle to current switch state so first post-arm change is detected
+            lastModeToggle = (receivedControl.toggle2 == 1);
         }
         else if (motorsArmed)
         {
             // Motors already armed - check for flight mode changes during flight
-            static bool lastModeToggle = false;
             bool currentModeToggle = (receivedControl.toggle2 == 1);
 
             if (currentModeToggle != lastModeToggle)
