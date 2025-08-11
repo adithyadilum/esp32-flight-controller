@@ -162,7 +162,7 @@ static bool USE_CASCADED_ANGLE_RATE = false; // If true, use angle outer loop ->
 #define STATUS_TASK_PRIORITY 1
 
 // Buzzer / proximity alert configuration
-#define BUZZER_PIN 26           // Reuse standard buzzer pin (kept consistent with other builds)
+#define BUZZER_PIN 26                       // Reuse standard buzzer pin (kept consistent with other builds)
 const uint16_t TOF_ALERT_DISTANCE_MM = 150; // 150mm = 15cm threshold
 const uint16_t TOF_CLEAR_DISTANCE_MM = 180; // Hysteresis exit threshold (reduce chatter)
 const uint16_t TOF_READ_INTERVAL_MS = 100;  // 10Hz ToF sampling (fast enough for approach warning)
@@ -181,10 +181,17 @@ ScioSense_ENS160 ens160(ENS160_I2CADDR_1); // Prefer standard 0x53 address; will
 Adafruit_MPU6050 mpu6050;
 // Multiple ToF sensors via I2C multiplexer (front/right/back/left)
 // Channel mapping (PCA9548A channel -> physical orientation)
-enum ToFOrientation { TOF_FRONT = 0, TOF_RIGHT = 1, TOF_BACK = 2, TOF_LEFT = 3, TOF_COUNT = 4 };
+enum ToFOrientation
+{
+    TOF_FRONT = 0,
+    TOF_RIGHT = 1,
+    TOF_BACK = 2,
+    TOF_LEFT = 3,
+    TOF_COUNT = 4
+};
 VL53L0X tofSensors[TOF_COUNT];
 volatile uint16_t tofDistancesMM[TOF_COUNT] = {0, 0, 0, 0};
-volatile bool obstacleClose = false; // Global obstacle flag (any sensor inside alert distance)
+volatile bool obstacleClose = false;    // Global obstacle flag (any sensor inside alert distance)
 volatile uint16_t minToFDistanceMM = 0; // Minimum valid distance among sensors
 
 // Select PCA9548A channel (returns true on success)
@@ -214,22 +221,25 @@ struct ControlPacket
     uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
+// Forward declaration for motor speed calculation (needed before motorTask use)
+void calculateMotorSpeeds(const ControlPacket &receivedControl);
+
 // Enhanced telemetry packet (22 bytes) - matches remote with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
-    int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
-    uint8_t humidity;      // % - Real AHT21 data
-    uint16_t battery;      // mV - Real battery voltage
-    int16_t latitude;      // GPS latitude (simplified)
-    int16_t longitude;     // GPS longitude (simplified)
-    uint8_t satellites;    // GPS satellite count
-    uint8_t status;        // System status
-    uint16_t lux;          // Light level in lux
-    int16_t altitude;      // Altitude in centimeters from BME280 (for 2 decimal precision)
-    uint16_t uvIndex;      // UV index x100 from GUVA sensor
-    uint16_t eCO2;         // Equivalent CO2 in ppm from ENS160
-    uint16_t TVOC;         // Total VOC in ppb from ENS160
+    int16_t temperature;  // x100 - Real BME280 data
+    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
+    uint8_t humidity;     // % - Real AHT21 data
+    uint16_t battery;     // mV - Real battery voltage
+    int16_t latitude;     // GPS latitude (simplified)
+    int16_t longitude;    // GPS longitude (simplified)
+    uint8_t satellites;   // GPS satellite count
+    uint8_t status;       // System status
+    uint16_t lux;         // Light level in lux
+    int16_t altitude;     // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;     // UV index x100 from GUVA sensor
+    uint16_t eCO2;        // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;        // Total VOC in ppb from ENS160
 };
 
 // Enhanced PID Controller Structure with Advanced Features
@@ -657,7 +667,7 @@ volatile float pidAltitudeOutput = 0.0;
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
 float MIX_KR = 100.0f; // Roll gain (μs per full command)
 float MIX_KP = 100.0f; // Pitch gain (μs per full command)
-float MIX_KY = 75.0f; // Yaw gain (μs per full command)
+float MIX_KY = 75.0f;  // Yaw gain (μs per full command)
 
 // ================================
 // MOTOR CALIBRATION OFFSETS (μs)
@@ -1123,9 +1133,9 @@ void sensorTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     // Run at 20Hz for smoother altitude updates; schedule slower sensors separately
-    const TickType_t loopFrequency = pdMS_TO_TICKS(50);  // 20Hz
-    const TickType_t envFrequency = pdMS_TO_TICKS(1000); // 1Hz env sensors
-    const TickType_t gpsFrequency = pdMS_TO_TICKS(100);  // 10Hz GPS
+    const TickType_t loopFrequency = pdMS_TO_TICKS(50);                  // 20Hz
+    const TickType_t envFrequency = pdMS_TO_TICKS(1000);                 // 1Hz env sensors
+    const TickType_t gpsFrequency = pdMS_TO_TICKS(100);                  // 10Hz GPS
     const TickType_t tofFrequency = pdMS_TO_TICKS(TOF_READ_INTERVAL_MS); // Target per-sensor cadence
 
     TickType_t lastEnvRead = 0;
@@ -1327,10 +1337,10 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-    telemetryData.temperature = 2500;          // 25.00°C
-    telemetryData.pressureX10 = 10132;         // 1013.2 hPa -> x10
-        telemetryData.humidity = 60;               // 60%
-        telemetryData.battery = 3700;              // 3.7V
+        telemetryData.temperature = 2500;  // 25.00°C
+        telemetryData.pressureX10 = 10132; // 1013.2 hPa -> x10
+        telemetryData.humidity = 60;       // 60%
+        telemetryData.battery = 3700;      // 3.7V
         telemetryData.latitude = 0;
         telemetryData.longitude = 0;
         telemetryData.satellites = 0;
@@ -1678,7 +1688,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-    localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
+        localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1773,7 +1783,7 @@ void readEnvironmentalSensors()
 
         static float pressure = 1013.20;
         pressure += (random(-5, 6) / 100.0); // simulate ~0.01 hPa steps
-    localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
+        localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
 
         localTelemetry.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }
@@ -2236,20 +2246,8 @@ void motorTask(void *parameter)
     }
 }
 
-// Calculate Motor Speeds from Control Inputs with PID Integration
-void calculateMotorSpeeds()
-{
-    // Backward-compatible wrapper using current global control (kept for any legacy calls)
-    ControlPacket cp;
-    if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(2)) == pdTRUE)
-    {
-        cp = receivedControl;
-        xSemaphoreGive(controlMutex);
-    }
-    calculateMotorSpeeds(cp);
-}
-
-// Latency-optimized variant using a snapshot of control inputs
+// Calculate Motor Speeds from Control Inputs (single authoritative overload)
+// Implementation using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
     // Track previous state of toggle2 for edge detection (stabilize/manual) across calls
@@ -2419,7 +2417,8 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
         // Manual mode - use scaled mixer with dynamic saturation management
         // Normalize stick inputs (-3000..3000) -> (-1.0 .. 1.0)
         float Rn = constrain((receivedControl.roll / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
-        float Pn = constrain((receivedControl.pitch / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
+        // Invert pitch normalization so positive stick command increases back motor thrust (nose-up)
+        float Pn = -constrain((receivedControl.pitch / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
         float Yn = constrain((receivedControl.yaw / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
         applyScaledMotorMix((float)baseThrottle, Rn, Pn, Yn);
         usedScaledMixing = true;
@@ -2829,8 +2828,9 @@ void pidControlTask(void *parameter)
                             // Roll stick mapping: positive stick -> positive roll angle
                             float rollSetpointRaw = map(receivedControl.roll, -3000, 3000,
                                                         -pidConfig.max_angle, pidConfig.max_angle);
+                            // Invert pitch setpoint mapping so positive stick yields positive nose-up angle
                             float pitchSetpointRaw = map(receivedControl.pitch, -3000, 3000,
-                                                         -pidConfig.max_angle, pidConfig.max_angle);
+                                                         pidConfig.max_angle, -pidConfig.max_angle);
 
                             // Slew limiting for roll/pitch setpoints (deg/sec)
                             float maxDeltaAngle = PID_SETPOINT_SLEW_ROLL_PITCH * (PID_LOOP_PERIOD / 1000.0f);

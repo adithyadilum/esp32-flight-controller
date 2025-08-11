@@ -1498,8 +1498,9 @@ void runPIDControllers()
     // Raw desired commands from sticks (pre-slew)
     // Invert roll stick here to compensate for previous sensor sign convention change
     float desiredRollDeg = (controlInputs.roll) * 30.0f; // +/-30°
-    float desiredPitchDeg = controlInputs.pitch * 30.0f; // +/-30°
-    float desiredYawRate = controlInputs.yaw * 180.0f;   // +/-180°/s (rate)
+    // Invert pitch: positive input should command nose-up (increase rear motor thrust)
+    float desiredPitchDeg = -controlInputs.pitch * 30.0f; // +/-30° (inverted)
+    float desiredYawRate = controlInputs.yaw * 180.0f;    // +/-180°/s (rate)
 
     // Apply calibration reference if IMU calibrated (angles already relative in sensorData)
     // Slew limit roll/pitch setpoints
@@ -1701,7 +1702,8 @@ void mixMotorOutputs()
         // Manual: use stick inputs directly normalized (already -1..1 expected)
         // Roll sign: positive roll input tilts right; left roll increases right-side motors
         Rn = constrainFloat((controlInputs.roll) * manualAxisGain, -1.0f, 1.0f);
-        Pn = constrainFloat(controlInputs.pitch * manualAxisGain, -1.0f, 1.0f);
+        // Invert pitch normalization so positive stick increases back motor thrust (nose-up)
+        Pn = -constrainFloat(controlInputs.pitch * manualAxisGain, -1.0f, 1.0f);
         Yn = constrainFloat(controlInputs.yaw * manualAxisGain, -1.0f, 1.0f);
     }
     else
@@ -1839,7 +1841,9 @@ void updateFlightMode()
             lastModeSwitch = controlInputs.mode_switch; // seed edge detector
             Serial.printf("🔓 ARMED - %s MODE\n", flightState.mode == MODE_STABILIZE ? "STABILIZE" : "MANUAL");
             // Simple feedback (non-blocking style minimal delays preserved)
-            digitalWrite(BUZZER_PIN, HIGH); delay(120); digitalWrite(BUZZER_PIN, LOW);
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(120);
+            digitalWrite(BUZZER_PIN, LOW);
         }
         else
         {
@@ -1870,7 +1874,9 @@ void updateFlightMode()
         // Reset PIDs when enabling stabilize for clean integrators
         if (flightState.mode == MODE_STABILIZE)
         {
-            rollPID.reset(); pitchPID.reset(); yawPID.reset();
+            rollPID.reset();
+            pitchPID.reset();
+            yawPID.reset();
         }
         lastModeSwitch = modeState;
     }
