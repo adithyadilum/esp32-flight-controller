@@ -189,7 +189,7 @@ struct ControlPacket
 struct TelemetryPacket
 {
     int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX100; // x100 - Real BME280 data (two decimals)
+    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
     uint8_t humidity;      // % - Real AHT21 data
     uint16_t battery;      // mV - Real battery voltage
     int16_t latitude;      // GPS latitude (simplified)
@@ -626,9 +626,33 @@ volatile float pidAltitudeOutput = 0.0;
 // Adjust to tune authority of each axis.
 // k_r: roll, k_p: pitch, k_y: yaw
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
-float MIX_KR = 200.0f; // Roll gain (μs per full command)
-float MIX_KP = 200.0f; // Pitch gain (μs per full command)
-float MIX_KY = 150.0f; // Yaw gain (μs per full command)
+float MIX_KR = 100.0f; // Roll gain (μs per full command)
+float MIX_KP = 100.0f; // Pitch gain (μs per full command)
+float MIX_KY = 75.0f; // Yaw gain (μs per full command)
+
+// ================================
+// MOTOR CALIBRATION OFFSETS (μs)
+// Adjust these constants to fine-tune hover balance or counter small frame / motor / ESC mismatches.
+// Positive values INCREASE that motor's output. Keep within roughly ±50 for initial tuning.
+// Motor layout reference:
+//   M1 = Front Right  (CCW)
+//   M2 = Back  Right  (CW)
+//   M3 = Front Left   (CW)
+//   M4 = Back  Left   (CCW)
+// Example: If the quad drifts forward-right, you may slightly raise rear-left (M4) or lower front-right (M1).
+// NOTE: These are compile-time constants; change and rebuild to apply.
+#ifndef MOTOR1_OFFSET_US
+#define MOTOR1_OFFSET_US 0
+#endif
+#ifndef MOTOR2_OFFSET_US
+#define MOTOR2_OFFSET_US 0
+#endif
+#ifndef MOTOR3_OFFSET_US
+#define MOTOR3_OFFSET_US 0
+#endif
+#ifndef MOTOR4_OFFSET_US
+#define MOTOR4_OFFSET_US 0
+#endif
 
 // PWM bounds (fallback to existing defines if present)
 #ifndef PWM_MIN_PULSE
@@ -638,15 +662,7 @@ float MIX_KY = 150.0f; // Yaw gain (μs per full command)
 #define PWM_MAX_PULSE ESC_MAX_PULSE
 #endif
 
-// ================================
-// Motor Calibration Offsets (μs)
-// Apply small per-motor corrections to compensate hardware imbalances.
-// Positive values increase that motor's command; defaults zero.
-// Applied AFTER mixing in all modes (manual and stabilized), same as v2.
-int MOTOR1_OFFSET_US = 0; // Front Right (CCW)
-int MOTOR2_OFFSET_US = 0; // Back  Right (CW)
-int MOTOR3_OFFSET_US = 0; // Front Left  (CW)
-int MOTOR4_OFFSET_US = 0; // Back  Left  (CCW)
+// (Runtime-adjustable motor offset variables removed in favor of compile-time constants above.)
 
 // ================================
 // Scaled Motor Mixing Function (Implements user-specified algorithm)
@@ -1169,8 +1185,8 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-        telemetryData.temperature = 2500;          // 25.00°C
-        telemetryData.pressureX100 = 101325 / 100; // 1013.25 hPa -> x100
+    telemetryData.temperature = 2500;          // 25.00°C
+    telemetryData.pressureX10 = 10132;         // 1013.2 hPa -> x10
         telemetryData.humidity = 60;               // 60%
         telemetryData.battery = 3700;              // 3.7V
         telemetryData.latitude = 0;
@@ -1520,7 +1536,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-        localTelemetry.pressureX100 = (uint16_t)(currentPressure * 100);
+    localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1601,7 +1617,7 @@ void readEnvironmentalSensors()
             if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
             {
                 localTelemetry.altitude = telemetryData.altitude;
-                localTelemetry.pressureX100 = telemetryData.pressureX100;
+                localTelemetry.pressureX10 = telemetryData.pressureX10;
                 xSemaphoreGive(telemetryMutex);
             }
         }
@@ -1615,7 +1631,7 @@ void readEnvironmentalSensors()
 
         static float pressure = 1013.20;
         pressure += (random(-5, 6) / 100.0); // simulate ~0.01 hPa steps
-        localTelemetry.pressureX100 = (uint16_t)(pressure * 100);
+    localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
 
         localTelemetry.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }
@@ -1799,7 +1815,7 @@ void updateBaroAltitude()
             if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
                 telemetryData.temperature = (int16_t)(temp * 100);
-                telemetryData.pressureX100 = (uint16_t)(currentPressure * 100);
+                telemetryData.pressureX10 = (uint16_t)(currentPressure * 10);
                 telemetryData.altitude = (int16_t)(altitude * 100); // meters -> cm
                 xSemaphoreGive(telemetryMutex);
             }
@@ -2015,7 +2031,7 @@ void printStatus()
     Serial.print("°C Hum:");
     Serial.print(currentTelemetry.humidity);
     Serial.print("% Press:");
-    Serial.print(currentTelemetry.pressureX100 / 100.0);
+    Serial.print(currentTelemetry.pressureX10 / 10.0);
     Serial.print("hPa Alt:");
     Serial.print(currentTelemetry.altitude / 100.0); // Display altitude in meters with 2 decimals
     Serial.print("m GPS:");
@@ -2094,6 +2110,8 @@ void calculateMotorSpeeds()
 // Latency-optimized variant using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
+    // Track previous state of toggle2 for edge detection (stabilize/manual) across calls
+    static bool lastModeToggle = false; // reflects last observed (receivedControl.toggle2==1) while armed
     // Check if motors should be armed (toggle switch 1 controls arming)
     if (receivedControl.toggle1 == 1)
     {
@@ -2128,11 +2146,12 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
                     xSemaphoreGive(serialMutex);
                 }
             }
+            // IMPORTANT: initialize lastModeToggle to current switch state so first post-arm change is detected
+            lastModeToggle = (receivedControl.toggle2 == 1);
         }
         else if (motorsArmed)
         {
             // Motors already armed - check for flight mode changes during flight
-            static bool lastModeToggle = false;
             bool currentModeToggle = (receivedControl.toggle2 == 1);
 
             if (currentModeToggle != lastModeToggle)
