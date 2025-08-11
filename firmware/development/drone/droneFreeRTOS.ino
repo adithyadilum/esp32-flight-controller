@@ -189,7 +189,7 @@ struct ControlPacket
 struct TelemetryPacket
 {
     int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX100; // x100 - Real BME280 data (two decimals)
+    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
     uint8_t humidity;      // % - Real AHT21 data
     uint16_t battery;      // mV - Real battery voltage
     int16_t latitude;      // GPS latitude (simplified)
@@ -1169,8 +1169,8 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-        telemetryData.temperature = 2500;          // 25.00°C
-        telemetryData.pressureX100 = 101325 / 100; // 1013.25 hPa -> x100
+    telemetryData.temperature = 2500;          // 25.00°C
+    telemetryData.pressureX10 = 10132;         // 1013.2 hPa -> x10
         telemetryData.humidity = 60;               // 60%
         telemetryData.battery = 3700;              // 3.7V
         telemetryData.latitude = 0;
@@ -1520,7 +1520,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-        localTelemetry.pressureX100 = (uint16_t)(currentPressure * 100);
+    localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1601,7 +1601,7 @@ void readEnvironmentalSensors()
             if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
             {
                 localTelemetry.altitude = telemetryData.altitude;
-                localTelemetry.pressureX100 = telemetryData.pressureX100;
+                localTelemetry.pressureX10 = telemetryData.pressureX10;
                 xSemaphoreGive(telemetryMutex);
             }
         }
@@ -1615,7 +1615,7 @@ void readEnvironmentalSensors()
 
         static float pressure = 1013.20;
         pressure += (random(-5, 6) / 100.0); // simulate ~0.01 hPa steps
-        localTelemetry.pressureX100 = (uint16_t)(pressure * 100);
+    localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
 
         localTelemetry.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }
@@ -1799,7 +1799,7 @@ void updateBaroAltitude()
             if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
                 telemetryData.temperature = (int16_t)(temp * 100);
-                telemetryData.pressureX100 = (uint16_t)(currentPressure * 100);
+                telemetryData.pressureX10 = (uint16_t)(currentPressure * 10);
                 telemetryData.altitude = (int16_t)(altitude * 100); // meters -> cm
                 xSemaphoreGive(telemetryMutex);
             }
@@ -2015,7 +2015,7 @@ void printStatus()
     Serial.print("°C Hum:");
     Serial.print(currentTelemetry.humidity);
     Serial.print("% Press:");
-    Serial.print(currentTelemetry.pressureX100 / 100.0);
+    Serial.print(currentTelemetry.pressureX10 / 10.0);
     Serial.print("hPa Alt:");
     Serial.print(currentTelemetry.altitude / 100.0); // Display altitude in meters with 2 decimals
     Serial.print("m GPS:");

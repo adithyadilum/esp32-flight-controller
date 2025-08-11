@@ -97,7 +97,7 @@ struct ControlPacket
 struct TelemetryPacket
 {
     int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX100; // x100 - Real BME280 data
+    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal to avoid overflow)
     uint8_t humidity;      // % - Real BME280 data
     uint16_t battery;      // mV - Real battery voltage
     int16_t latitude;      // GPS latitude (simplified)
@@ -1229,7 +1229,7 @@ void printTelemetryData()
     Serial.print("Temp:");
     Serial.print(telemetryData.temperature / 100.0, 1);
     Serial.print("°C | Press:");
-    Serial.print(telemetryData.pressureX100 / 100.0, 2);
+    Serial.print(telemetryData.pressureX10 / 10.0, 1);
     Serial.print("hPa | Hum:");
     Serial.print(telemetryData.humidity);
     Serial.print("% | Alt:");
@@ -1463,7 +1463,10 @@ void uploadTelemetryToFirebase()
     // We only call this when telemetryReceived is true
     json.set("temperature", telemetryData.temperature / 100.0);
     json.set("humidity", telemetryData.humidity);
-    json.set("pressure", telemetryData.pressureX100 / 100.0);
+    json.set("pressure", telemetryData.pressureX10 / 10.0);
+    json.set("pressure", telemetryData.pressureX10 / 10.0);
+    Serial.print(telemetryData.pressureX10 / 10.0, 1);
+    json.set("pressure", telemetryData.pressureX10 / 10.0);
     json.set("altitude", telemetryData.altitude / 100.0);
     json.set("battery", telemetryData.battery);
     json.set("lux", telemetryData.lux);
