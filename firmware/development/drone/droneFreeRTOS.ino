@@ -41,6 +41,8 @@
 #include <freertos/semphr.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+// Added Time-of-Flight distance sensor for obstacle proximity alert
+#include <VL53L0X.h>
 
 // Pin Definitions
 #define CE_PIN 4
@@ -67,6 +69,10 @@
 #define BH1750_ADDRESS 0x23
 #define ENS160_ADDRESS 0x53
 #define MPU6050_ADDRESS 0x68
+// Default VL53L0X I2C address (single sensor). If adding multiples later, handle XSHUT pins.
+#define VL53L0X_ADDRESS 0x29
+// PCA9548A I2C multiplexer address (for multiple VL53L0X sensors)
+#define PCA9548A_ADDRESS 0x70
 
 // PID Control Configuration
 #define PID_LOOP_FREQUENCY 50                       // Hz - 50Hz PID loop for smooth control
@@ -155,6 +161,14 @@ static bool USE_CASCADED_ANGLE_RATE = false; // If true, use angle outer loop ->
 #define RADIO_TASK_PRIORITY 3
 #define STATUS_TASK_PRIORITY 1
 
+// Buzzer / proximity alert configuration
+#define BUZZER_PIN 26           // Reuse standard buzzer pin (kept consistent with other builds)
+const uint16_t TOF_ALERT_DISTANCE_MM = 150; // 150mm = 15cm threshold
+const uint16_t TOF_CLEAR_DISTANCE_MM = 180; // Hysteresis exit threshold (reduce chatter)
+const uint16_t TOF_READ_INTERVAL_MS = 100;  // 10Hz ToF sampling (fast enough for approach warning)
+const uint16_t TOF_BUZZER_PULSE_MS = 60;    // On-time per alert pulse
+const uint16_t TOF_BUZZER_REST_MS = 240;    // Off-time between pulses while obstacle persists
+
 RF24 radio(CE_PIN, CSN_PIN);
 const byte address[6] = "00001";
 
@@ -165,6 +179,21 @@ TinyGPSPlus gps;
 BH1750 lightMeter;
 ScioSense_ENS160 ens160(ENS160_I2CADDR_1); // Prefer standard 0x53 address; will probe and retry in init
 Adafruit_MPU6050 mpu6050;
+// Multiple ToF sensors via I2C multiplexer (front/right/back/left)
+// Channel mapping (PCA9548A channel -> physical orientation)
+enum ToFOrientation { TOF_FRONT = 0, TOF_RIGHT = 1, TOF_BACK = 2, TOF_LEFT = 3, TOF_COUNT = 4 };
+VL53L0X tofSensors[TOF_COUNT];
+volatile uint16_t tofDistancesMM[TOF_COUNT] = {0, 0, 0, 0};
+volatile bool obstacleClose = false; // Global obstacle flag (any sensor inside alert distance)
+volatile uint16_t minToFDistanceMM = 0; // Minimum valid distance among sensors
+
+// Select PCA9548A channel (returns true on success)
+static bool selectToFChannel(uint8_t channel)
+{
+    Wire.beginTransmission(PCA9548A_ADDRESS);
+    Wire.write(1 << channel); // One-hot channel select
+    return (Wire.endTransmission() == 0);
+}
 
 // Track GPS altitude (meters) separately for fusion with barometric altitude
 volatile float gpsAltitudeMeters = NAN;
@@ -837,6 +866,8 @@ void setup()
     // Configure ADC attenuation for accurate battery measurements up to ~3.3V
     analogSetAttenuation(ADC_11db);
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
 
     // Initialize GPS (Serial2 on ESP32)
     Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -871,6 +902,35 @@ void setup()
 
     // Initialize real sensors
     initializeRealSensors();
+
+    // Initialize all VL53L0X sensors through PCA9548A (non-fatal if some absent)
+    bool anyToF = false;
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(400)) == pdTRUE)
+    {
+        for (uint8_t ch = 0; ch < TOF_COUNT; ++ch)
+        {
+            if (!selectToFChannel(ch))
+                continue;
+            delay(5); // Allow channel settle
+            if (tofSensors[ch].init())
+            {
+                tofSensors[ch].setTimeout(50);
+                // Use single-shot mode (readRangeSingleMillimeters) to avoid parallel continuous conflicts
+                anyToF = true;
+            }
+        }
+        // Return to channel 0 as default
+        selectToFChannel(0);
+        xSemaphoreGive(i2cMutex);
+    }
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(120)) == pdTRUE)
+    {
+        if (anyToF)
+            Serial.println("VL53L0X sensors initialized via PCA9548A multiplexer");
+        else
+            Serial.println("WARNING: No VL53L0X sensors detected (multiplexer channels 0-3)");
+        xSemaphoreGive(serialMutex);
+    }
 
     // Initialize IMU and PID controllers (IMU calibration will run here for faster startup)
     initializeIMUAndPID();
@@ -1066,9 +1126,16 @@ void sensorTask(void *parameter)
     const TickType_t loopFrequency = pdMS_TO_TICKS(50);  // 20Hz
     const TickType_t envFrequency = pdMS_TO_TICKS(1000); // 1Hz env sensors
     const TickType_t gpsFrequency = pdMS_TO_TICKS(100);  // 10Hz GPS
+    const TickType_t tofFrequency = pdMS_TO_TICKS(TOF_READ_INTERVAL_MS); // Target per-sensor cadence
 
     TickType_t lastEnvRead = 0;
     TickType_t lastGPSRead = 0;
+    TickType_t lastTofRead = 0;
+    uint8_t currentToFChannel = 0; // Round-robin channel index
+
+    // Buzzer pulse state machine variables
+    bool buzzerOn = false;
+    unsigned long buzzerPhaseStart = millis();
 
     for (;;)
     {
@@ -1097,6 +1164,81 @@ void sensorTask(void *parameter)
         {
             updateGPS();
             lastGPSRead = nowTicks;
+        }
+
+        // Read one ToF sensor per interval (round-robin across channels)
+        if ((nowTicks - lastTofRead) >= tofFrequency)
+        {
+            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(8)) == pdTRUE)
+            {
+                if (selectToFChannel(currentToFChannel))
+                {
+                    delayMicroseconds(500); // Small settle time
+                    uint16_t d = tofSensors[currentToFChannel].readRangeSingleMillimeters();
+                    if (tofSensors[currentToFChannel].timeoutOccurred() || d == 0 || d > 4000)
+                    {
+                        // Keep previous value (stale) or mark invalid as 0
+                        // Optionally: tofDistancesMM[currentToFChannel] = 0;
+                    }
+                    else
+                    {
+                        tofDistancesMM[currentToFChannel] = d;
+                    }
+                }
+                xSemaphoreGive(i2cMutex);
+            }
+
+            // Advance channel
+            currentToFChannel = (currentToFChannel + 1) % TOF_COUNT;
+            lastTofRead = nowTicks;
+
+            // Compute minimum valid distance & update obstacle flag with hysteresis
+            uint16_t minD = 0; // 0 means none
+            for (uint8_t i = 0; i < TOF_COUNT; ++i)
+            {
+                uint16_t v = tofDistancesMM[i];
+                if (v == 0)
+                    continue;
+                if (minD == 0 || v < minD)
+                    minD = v;
+            }
+            minToFDistanceMM = minD;
+            if (!obstacleClose && minD > 0 && minD <= TOF_ALERT_DISTANCE_MM)
+                obstacleClose = true;
+            else if (obstacleClose && (minD == 0 || minD > TOF_CLEAR_DISTANCE_MM))
+                obstacleClose = false;
+        }
+
+        // Buzzer alert logic (non-blocking, simple pulse pattern while obstacle present)
+        if (obstacleClose)
+        {
+            unsigned long nowMs = millis();
+            if (buzzerOn)
+            {
+                if (nowMs - buzzerPhaseStart >= TOF_BUZZER_PULSE_MS)
+                {
+                    digitalWrite(BUZZER_PIN, LOW);
+                    buzzerOn = false;
+                    buzzerPhaseStart = nowMs; // Start rest phase
+                }
+            }
+            else
+            {
+                if (nowMs - buzzerPhaseStart >= TOF_BUZZER_REST_MS)
+                {
+                    digitalWrite(BUZZER_PIN, HIGH);
+                    buzzerOn = true;
+                    buzzerPhaseStart = nowMs; // Start pulse phase
+                }
+            }
+        }
+        else
+        {
+            if (buzzerOn)
+            {
+                digitalWrite(BUZZER_PIN, LOW);
+                buzzerOn = false;
+            }
         }
 
         // Wait for next cycle

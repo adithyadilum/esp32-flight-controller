@@ -4,16 +4,17 @@
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
 #include <Wire.h>
-#include <SPI.h>
-#include <RF24.h>
+// #include <SPI.h> // SPI not needed in WiFi-only build (NRF24 removed)
+// #include <RF24.h> // Radio removed
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_BME280.h>
-#include <BH1750.h>
-#include <TinyGPS++.h>
-#include "ScioSense_ENS160.h"
-#include <Adafruit_AHTX0.h>
+#include <TinyGPS++.h> // GPS kept (future altitude fusion & UI fields reference altitude_gps)
+// Unused environmental / light / air-quality / ToF sensors removed for WiFi-only controller:
+// #include <BH1750.h>
+// #include "ScioSense_ENS160.h"
+// #include <Adafruit_AHTX0.h>
 #include <Adafruit_Sensor.h>
-#include <VL53L0X.h>
+// #include <VL53L0X.h>
 
 // FreeRTOS
 #include "freertos/FreeRTOS.h"
@@ -29,8 +30,9 @@ const char *password = "0N7NT00ANTQ"; // Change this to your WiFi password
 WebServer server(80);
 
 // Component Pins
-#define NRF_CE_PIN 4
-#define NRF_CSN_PIN 5
+// NRF24L01 pins removed (radio not used in WiFi build)
+// #define NRF_CE_PIN 4
+// #define NRF_CSN_PIN 5
 #define ESC1_PIN 13 // Front Right (CCW)
 #define ESC2_PIN 12 // Back Right (CW)
 #define ESC3_PIN 14 // Front Left (CW)
@@ -54,7 +56,7 @@ WebServer server(80);
 #define NAV_BACK_CENTER_WHITE 15
 
 // PCA9548A I2C Multiplexer
-#define PCA9548A_ADDR 0x70
+// #define PCA9548A_ADDR 0x70 // I2C multiplexer not used (ToF sensors removed)
 
 // Control Loop Timing
 #define CONTROL_LOOP_FREQUENCY 100                          // Hz
@@ -68,20 +70,14 @@ WebServer server(80);
 #define MOTOR_HOVER_ESTIMATE 1550 // Will be calibrated
 
 // Component Objects
-RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+// RF24 radio removed – WiFi dashboard provides control inputs
 Servo esc1, esc2, esc3, esc4;
 Adafruit_MPU6050 mpu;
 Adafruit_BME280 bme;
-ScioSense_ENS160 ens160(ENS160_I2CADDR_1);
-Adafruit_AHTX0 aht21;
-BH1750 lightMeter;
+// Removed unused environmental sensor objects (ENS160, AHT21, BH1750)
 TinyGPSPlus gps;
 
-// ToF Sensors via PCA9548A
-VL53L0X tof_front; // Channel 0
-VL53L0X tof_right; // Channel 1
-VL53L0X tof_back;  // Channel 2
-VL53L0X tof_left;  // Channel 3
+// Removed ToF sensor objects (VL53L0X) – not used in stabilization logic yet
 
 // ================================
 // CUSTOM PID CONTROLLER IMPLEMENTATION
@@ -598,10 +594,11 @@ MotorCalibration motorCal = {
 // Unified Motor Mixing (Matches droneFreeRTOS)
 // =====================================
 // Tunable mixer gains (μs contribution at full normalized input |R|=|P|=|Y|=1)
-// Keep identical to droneFreeRTOS for consistent tuning behavior across builds.
-float MIX_KR = 200.0f; // Roll gain
-float MIX_KP = 200.0f; // Pitch gain
-float MIX_KY = 150.0f; // Yaw gain
+// Aligned with RF (droneFreeRTOS.ino) build for cross-build tuning consistency.
+// If you need higher authority, adjust here AND in the RF version together.
+float MIX_KR = 100.0f; // Roll gain (was 200.0f pre-unification)
+float MIX_KP = 100.0f; // Pitch gain (was 200.0f)
+float MIX_KY = 75.0f;  // Yaw gain (was 150.0f)
 
 // =====================================
 // Live-tunable control enhancement variables (mirroring droneFreeRTOS)
@@ -880,8 +877,7 @@ void initializeHardware()
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000); // 400kHz for faster sensor reads
 
-    // Initialize SPI for NRF24L01
-    SPI.begin(18, 19, 23, 5);
+    // SPI init removed (only used for NRF24L01 previously). Re-enable if future peripherals require SPI.
 
     // Initialize MPU6050 IMU
     if (mpu.begin(0x68))
@@ -1490,6 +1486,8 @@ void calculateOrientation()
 
 void runPIDControllers()
 {
+    // Unified with RF controller logic: MANUAL mode passes raw sticks to mixer; STABILIZE enables angle/yaw rate PIDs.
+    // Mixer gains have been reduced to 100/100/75 to match droneFreeRTOS.ino for consistent tuning behavior.
     // Time delta for slew limiting
     unsigned long nowMs = millis();
     float dt = (prevSlewTimeMs == 0) ? 0.01f : (float)(nowMs - prevSlewTimeMs) / 1000.0f;
@@ -1812,117 +1810,72 @@ void handleEmergency()
 
 void updateFlightMode()
 {
-    // Handle arming/disarming
-    if (controlInputs.arm_switch && !flightState.motors_armed)
-    {
-        // Arm motors (safety checks)
-        bool throttle_ok = (controlInputs.throttle < 0.1);
-        bool level_ok = true;   // Default to OK if no sensor data yet
-        bool battery_ok = true; // Default to OK if no battery data yet
+    // Edge-detected arming & mode toggling unified with RF build semantics.
+    // arm_switch: momentary or latched; we treat rising edge (false->true) as ARMED, falling as DISARM.
+    // mode_switch: while armed, changes flight mode: false = MANUAL, true = STABILIZE.
+    static bool lastArmSwitch = false;
+    static bool lastModeSwitch = false;
 
-        // Only check angles if we have valid sensor data
+    bool armEdgeRising = (!lastArmSwitch && controlInputs.arm_switch);
+    bool armEdgeFalling = (lastArmSwitch && !controlInputs.arm_switch);
+    lastArmSwitch = controlInputs.arm_switch;
+
+    // Handle arming on rising edge
+    if (armEdgeRising && !flightState.motors_armed)
+    {
+        bool throttle_ok = (controlInputs.throttle < 0.05f); // require near-zero throttle
+        bool level_ok = true;
         if (sensorData.timestamp > 0 && sensorData.valid)
         {
-            level_ok = (abs(sensorData.roll_angle) < 30.0 && abs(sensorData.pitch_angle) < 30.0);
+            level_ok = (fabs(sensorData.roll_angle) < 30.0f && fabs(sensorData.pitch_angle) < 30.0f);
         }
-
-        // Battery check disabled for now - display only
-        // TODO: Fix battery voltage reading issue
-        // if (sensorData.battery_voltage > 9.0)
-        // {
-        //     battery_ok = (sensorData.battery_percentage > 15.0);
-        // }
-
-        if (throttle_ok && level_ok && battery_ok)
+        if (throttle_ok && level_ok)
         {
             flightState.motors_armed = true;
             flightState.arm_time = millis();
-            flightState.mode = MODE_MANUAL;
             flightState.emergency_stop = false;
-
-            Serial.println("Motors ARMED");
-
-            // Visual/audio feedback - use green navigation LEDs
-            for (int i = 0; i < 3; i++)
-            {
-                digitalWrite(NAV_FRONT_RIGHT_GREEN, LOW);
-                digitalWrite(NAV_BACK_RIGHT_GREEN, LOW);
-                delay(100);
-                digitalWrite(NAV_FRONT_RIGHT_GREEN, HIGH);
-                digitalWrite(NAV_BACK_RIGHT_GREEN, HIGH);
-                delay(100);
-            }
-
-            digitalWrite(BUZZER_PIN, HIGH);
-            delay(150);
-            digitalWrite(BUZZER_PIN, LOW);
+            // Determine initial mode from current mode_switch state
+            flightState.mode = controlInputs.mode_switch ? MODE_STABILIZE : MODE_MANUAL;
+            lastModeSwitch = controlInputs.mode_switch; // seed edge detector
+            Serial.printf("🔓 ARMED - %s MODE\n", flightState.mode == MODE_STABILIZE ? "STABILIZE" : "MANUAL");
+            // Simple feedback (non-blocking style minimal delays preserved)
+            digitalWrite(BUZZER_PIN, HIGH); delay(120); digitalWrite(BUZZER_PIN, LOW);
         }
         else
         {
-            Serial.println("ARM FAILED: Safety checks failed");
-            Serial.printf("Throttle: %.2f, Level: %s, Battery: %s (disabled)\n",
-                          controlInputs.throttle,
-                          level_ok ? "OK" : "FAIL",
-                          battery_ok ? "OK" : "FAIL");
+            Serial.printf("ARM BLOCKED (thr %.2f, level %s)\n", controlInputs.throttle, level_ok ? "OK" : "BAD");
         }
     }
-    else if (!controlInputs.arm_switch && flightState.motors_armed)
+    // Disarm on falling edge
+    if (armEdgeFalling && flightState.motors_armed)
     {
-        // Disarm motors
         flightState.motors_armed = false;
         flightState.mode = MODE_DISARMED;
         flightState.altitude_hold_active = false;
-
-        Serial.println("Motors DISARMED");
-
-        // Turn off center white LEDs when disarmed
+        Serial.println("🔒 DISARMED");
         digitalWrite(NAV_FRONT_CENTER_WHITE, LOW);
         digitalWrite(NAV_BACK_CENTER_WHITE, LOW);
     }
 
-    // Handle flight mode changes (when armed)
-    if (flightState.motors_armed)
-    {
-        if (controlInputs.mode_switch)
-        {
-            flightState.mode = MODE_STABILIZE;
-            Serial.println("Flight Mode: STABILIZE");
-        }
-        else
-        {
-            flightState.mode = MODE_MANUAL;
-        }
+    // If not armed, nothing further
+    if (!flightState.motors_armed)
+        return;
 
-        // Altitude hold activation disabled for testing
-        // TODO: Implement proper altitude hold activation method (e.g., switch or button)
-        /*
-        // Altitude hold activation (example: holding yaw stick for 2 seconds)
-        static unsigned long yaw_hold_start = 0;
-        if (abs(controlInputs.yaw) < 0.1 && controlInputs.throttle > 0.3)
+    // Mode switch edge detection (supports in-flight switching)
+    bool modeState = controlInputs.mode_switch;
+    if (modeState != lastModeSwitch)
+    {
+        flightState.mode = modeState ? MODE_STABILIZE : MODE_MANUAL;
+        Serial.printf("🛩 Flight Mode -> %s\n", flightState.mode == MODE_STABILIZE ? "STABILIZE" : "MANUAL");
+        // Reset PIDs when enabling stabilize for clean integrators
+        if (flightState.mode == MODE_STABILIZE)
         {
-            if (yaw_hold_start == 0)
-            {
-                yaw_hold_start = millis();
-            }
-            else if (millis() - yaw_hold_start > 2000)
-            {
-                flightState.altitude_hold_active = true;
-                altitudePID.setpoint = sensorData.altitude_filtered;
-                Serial.println("Altitude Hold ACTIVATED");
-                yaw_hold_start = 0;
-            }
+            rollPID.reset(); pitchPID.reset(); yawPID.reset();
         }
-        else
-        {
-            yaw_hold_start = 0;
-            if (flightState.altitude_hold_active && abs(controlInputs.throttle) > 0.1)
-            {
-                flightState.altitude_hold_active = false;
-                Serial.println("Altitude Hold DEACTIVATED");
-            }
-        }
-        */
+        lastModeSwitch = modeState;
     }
+
+    // (Altitude hold activation remains disabled / placeholder to avoid unintentional engagement.)
 }
 
 // ================================
@@ -2249,6 +2202,12 @@ void setupWebServer()
                     <label>I: <input type="number" id="yaw_i" value="0.0" step="0.01" onchange="updatePID()"></label><br>
                     <label>D: <input type="number" id="yaw_d" value="0.05" step="0.01" onchange="updatePID()"></label><br>
                 </div>
+                <div>
+                    <h3>Altitude PID</h3>
+                    <label>P: <input type="number" id="alt_p" value="1.50" step="0.05" onchange="updatePID()"></label><br>
+                    <label>I: <input type="number" id="alt_i" value="0.20" step="0.01" onchange="updatePID()"></label><br>
+                    <label>D: <input type="number" id="alt_d" value="0.80" step="0.05" onchange="updatePID()"></label><br>
+                </div>
             </div>
                         <hr>
                         <h3>Mixer / Control Gains</h3>
@@ -2264,6 +2223,8 @@ void setupWebServer()
                                 <label>Slew Roll/Pitch (deg/s): <input type="number" id="slew_rp" value="120" step="5" onchange="updatePID()"></label><br>
                                 <label>Slew Yaw Rate (deg/s/s): <input type="number" id="slew_yaw" value="720" step="10" onchange="updatePID()"></label><br>
                                 <label>Yaw Feed-Forward: <input type="number" id="yaw_ff" value="0.10" step="0.01" onchange="updatePID()"></label><br>
+                                <label>Hover Throttle (µs): <input type="number" id="hover_thr" value="1550" step="5" onchange="updatePID()"></label><br>
+                                <label>Integral Leak (0-0.05): <input type="number" id="i_leak" value="0.001" step="0.001" min="0" max="0.05" onchange="updatePID()"></label><br>
                             </div>
                         </div>
                         <hr>
@@ -2449,6 +2410,9 @@ void setupWebServer()
                 yaw_p: parseFloat(document.getElementById('yaw_p').value),
                 yaw_i: parseFloat(document.getElementById('yaw_i').value),
                 yaw_d: parseFloat(document.getElementById('yaw_d').value),
+                alt_p: parseFloat(document.getElementById('alt_p').value),
+                alt_i: parseFloat(document.getElementById('alt_i').value),
+                alt_d: parseFloat(document.getElementById('alt_d').value),
                 mix_kr: parseFloat(document.getElementById('mix_kr').value),
                 mix_kp: parseFloat(document.getElementById('mix_kp').value),
                 mix_ky: parseFloat(document.getElementById('mix_ky').value),
@@ -2457,6 +2421,8 @@ void setupWebServer()
                 slew_rp: parseFloat(document.getElementById('slew_rp').value),
                 slew_yaw: parseFloat(document.getElementById('slew_yaw').value),
                 yaw_ff: parseFloat(document.getElementById('yaw_ff').value),
+                hover_thr: parseFloat(document.getElementById('hover_thr').value),
+                i_leak: parseFloat(document.getElementById('i_leak').value),
                 use_kalman: document.getElementById('use_kalman').checked,
                 kalman_rate_std: parseFloat(document.getElementById('kalman_rate_std').value),
                 kalman_meas_std: parseFloat(document.getElementById('kalman_meas_std').value),
@@ -2753,6 +2719,9 @@ void setupWebServer()
             pidParams.yaw_kp = doc["yaw_p"];
             pidParams.yaw_ki = doc["yaw_i"];
             pidParams.yaw_kd = doc["yaw_d"];
+            if (doc.containsKey("alt_p")) pidParams.altitude_kp = doc["alt_p"].as<double>();
+            if (doc.containsKey("alt_i")) pidParams.altitude_ki = doc["alt_i"].as<double>();
+            if (doc.containsKey("alt_d")) pidParams.altitude_kd = doc["alt_d"].as<double>();
             // Extended mixer / control constants (live tuning)
             if (doc.containsKey("mix_kr")) MIX_KR = doc["mix_kr"]; 
             if (doc.containsKey("mix_kp")) MIX_KP = doc["mix_kp"]; 
@@ -2762,11 +2731,18 @@ void setupWebServer()
             if (doc.containsKey("slew_rp"))          slewRateRP     = doc["slew_rp"].as<float>();
             if (doc.containsKey("slew_yaw"))         slewRateYaw    = doc["slew_yaw"].as<float>();
             if (doc.containsKey("yaw_ff"))           yawFeedForward = doc["yaw_ff"].as<float>();
+            if (doc.containsKey("hover_thr"))        flightState.hover_throttle = doc["hover_thr"].as<float>();
+            if (doc.containsKey("i_leak")) {
+                float leak = doc["i_leak"].as<float>();
+                leak = constrain(leak, 0.0f, 0.05f);
+                rollPID.iTermLeak = leak; pitchPID.iTermLeak = leak; yawPID.iTermLeak = leak; altitudePID.iTermLeak = leak; rollRatePID.iTermLeak = leak; pitchRatePID.iTermLeak = leak;
+            }
             
             // Apply to custom PID controllers
             rollPID.setTunings(pidParams.roll_kp, pidParams.roll_ki, pidParams.roll_kd);
             pitchPID.setTunings(pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd);
             yawPID.setTunings(pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd);
+            altitudePID.setTunings(pidParams.altitude_kp, pidParams.altitude_ki, pidParams.altitude_kd);
             
             // Advanced fusion/control toggles and parameters
             if (doc.containsKey("use_kalman")) {
@@ -2842,6 +2818,11 @@ void setupWebServer()
         doc["pid"]["roll_setpoint"] = debugData.roll_setpoint;
         doc["pid"]["pitch_setpoint"] = debugData.pitch_setpoint;
         doc["pid"]["yaw_setpoint"] = debugData.yaw_setpoint;
+    doc["pid"]["alt_p"] = pidParams.altitude_kp;
+    doc["pid"]["alt_i"] = pidParams.altitude_ki;
+    doc["pid"]["alt_d"] = pidParams.altitude_kd;
+    doc["pid"]["hover_thr"] = flightState.hover_throttle;
+    doc["pid"]["i_leak"] = rollPID.iTermLeak;
         
         // Advanced PID Diagnostics - Individual P, I, D components
         doc["pid"]["roll_p"] = debugData.roll_proportional;
