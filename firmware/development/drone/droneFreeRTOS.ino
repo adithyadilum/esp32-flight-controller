@@ -16,7 +16,7 @@
  *
  * FreeRTOS Task Architecture:
  * - SensorTask: Reads all sensors (1Hz for environmental, 10Hz for GPS)
- * - RadioTask: Handles RF24 communication (5Hz control reception, 1Hz telemetry transmission)
+ * - RadioTask: Handles RF24 communication (now 500Hz polling for low-latency control reception, ~1Hz telemetry ack updates)
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
  * - MotorTask: ESC control with PID integration (50Hz)
  * - IMUTask: High-frequency IMU reading and calibration (100Hz)
@@ -41,8 +41,6 @@
 #include <freertos/semphr.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-// Added Time-of-Flight distance sensor for obstacle proximity alert
-#include <VL53L0X.h>
 
 // Pin Definitions
 #define CE_PIN 4
@@ -69,10 +67,6 @@
 #define BH1750_ADDRESS 0x23
 #define ENS160_ADDRESS 0x53
 #define MPU6050_ADDRESS 0x68
-// Default VL53L0X I2C address (single sensor). If adding multiples later, handle XSHUT pins.
-#define VL53L0X_ADDRESS 0x29
-// PCA9548A I2C multiplexer address (for multiple VL53L0X sensors)
-#define PCA9548A_ADDRESS 0x70
 
 // PID Control Configuration
 #define PID_LOOP_FREQUENCY 50                       // Hz - 50Hz PID loop for smooth control
@@ -161,14 +155,6 @@ static bool USE_CASCADED_ANGLE_RATE = false; // If true, use angle outer loop ->
 #define RADIO_TASK_PRIORITY 3
 #define STATUS_TASK_PRIORITY 1
 
-// Buzzer / proximity alert configuration
-#define BUZZER_PIN 26                       // Reuse standard buzzer pin (kept consistent with other builds)
-const uint16_t TOF_ALERT_DISTANCE_MM = 150; // 150mm = 15cm threshold
-const uint16_t TOF_CLEAR_DISTANCE_MM = 180; // Hysteresis exit threshold (reduce chatter)
-const uint16_t TOF_READ_INTERVAL_MS = 100;  // 10Hz ToF sampling (fast enough for approach warning)
-const uint16_t TOF_BUZZER_PULSE_MS = 60;    // On-time per alert pulse
-const uint16_t TOF_BUZZER_REST_MS = 240;    // Off-time between pulses while obstacle persists
-
 RF24 radio(CE_PIN, CSN_PIN);
 const byte address[6] = "00001";
 
@@ -179,28 +165,6 @@ TinyGPSPlus gps;
 BH1750 lightMeter;
 ScioSense_ENS160 ens160(ENS160_I2CADDR_1); // Prefer standard 0x53 address; will probe and retry in init
 Adafruit_MPU6050 mpu6050;
-// Multiple ToF sensors via I2C multiplexer (front/right/back/left)
-// Channel mapping (PCA9548A channel -> physical orientation)
-enum ToFOrientation
-{
-    TOF_FRONT = 0,
-    TOF_RIGHT = 1,
-    TOF_BACK = 2,
-    TOF_LEFT = 3,
-    TOF_COUNT = 4
-};
-VL53L0X tofSensors[TOF_COUNT];
-volatile uint16_t tofDistancesMM[TOF_COUNT] = {0, 0, 0, 0};
-volatile bool obstacleClose = false;    // Global obstacle flag (any sensor inside alert distance)
-volatile uint16_t minToFDistanceMM = 0; // Minimum valid distance among sensors
-
-// Select PCA9548A channel (returns true on success)
-static bool selectToFChannel(uint8_t channel)
-{
-    Wire.beginTransmission(PCA9548A_ADDRESS);
-    Wire.write(1 << channel); // One-hot channel select
-    return (Wire.endTransmission() == 0);
-}
 
 // Track GPS altitude (meters) separately for fusion with barometric altitude
 volatile float gpsAltitudeMeters = NAN;
@@ -221,18 +185,16 @@ struct ControlPacket
     uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Forward declaration for motor speed calculation (needed before motorTask use)
-void calculateMotorSpeeds(const ControlPacket &receivedControl);
-
-// Enhanced telemetry packet (22 bytes) - matches remote with lux, altitude, UV index, eCO2, and TVOC
+// Enhanced telemetry packet (development) - now with high precision GPS (lat/lon * 1e7)
+// NOTE: Size increased due to int32_t latitude/longitude; keep under NRF24 32-byte limit.
 struct TelemetryPacket
 {
     int16_t temperature;  // x100 - Real BME280 data
-    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
+    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, avoids 16-bit overflow)
     uint8_t humidity;     // % - Real AHT21 data
     uint16_t battery;     // mV - Real battery voltage
-    int16_t latitude;     // GPS latitude (simplified)
-    int16_t longitude;    // GPS longitude (simplified)
+    int32_t latitudeE7;   // GPS latitude * 1e7 (high precision, ~1cm)
+    int32_t longitudeE7;  // GPS longitude * 1e7
     uint8_t satellites;   // GPS satellite count
     uint8_t status;       // System status
     uint16_t lux;         // Light level in lux
@@ -665,33 +627,9 @@ volatile float pidAltitudeOutput = 0.0;
 // Adjust to tune authority of each axis.
 // k_r: roll, k_p: pitch, k_y: yaw
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
-float MIX_KR = 100.0f; // Roll gain (μs per full command)
-float MIX_KP = 100.0f; // Pitch gain (μs per full command)
-float MIX_KY = 75.0f;  // Yaw gain (μs per full command)
-
-// ================================
-// MOTOR CALIBRATION OFFSETS (μs)
-// Adjust these constants to fine-tune hover balance or counter small frame / motor / ESC mismatches.
-// Positive values INCREASE that motor's output. Keep within roughly ±50 for initial tuning.
-// Motor layout reference:
-//   M1 = Front Right  (CCW)
-//   M2 = Back  Right  (CW)
-//   M3 = Front Left   (CW)
-//   M4 = Back  Left   (CCW)
-// Example: If the quad drifts forward-right, you may slightly raise rear-left (M4) or lower front-right (M1).
-// NOTE: These are compile-time constants; change and rebuild to apply.
-#ifndef MOTOR1_OFFSET_US
-#define MOTOR1_OFFSET_US 0
-#endif
-#ifndef MOTOR2_OFFSET_US
-#define MOTOR2_OFFSET_US 0
-#endif
-#ifndef MOTOR3_OFFSET_US
-#define MOTOR3_OFFSET_US 0
-#endif
-#ifndef MOTOR4_OFFSET_US
-#define MOTOR4_OFFSET_US 0
-#endif
+float MIX_KR = 200.0f; // Roll gain (μs per full command)
+float MIX_KP = 200.0f; // Pitch gain (μs per full command)
+float MIX_KY = 150.0f; // Yaw gain (μs per full command)
 
 // PWM bounds (fallback to existing defines if present)
 #ifndef PWM_MIN_PULSE
@@ -701,7 +639,15 @@ float MIX_KY = 75.0f;  // Yaw gain (μs per full command)
 #define PWM_MAX_PULSE ESC_MAX_PULSE
 #endif
 
-// (Runtime-adjustable motor offset variables removed in favor of compile-time constants above.)
+// ================================
+// Motor Calibration Offsets (μs)
+// Apply small per-motor corrections to compensate hardware imbalances.
+// Positive values increase that motor's command; defaults zero.
+// Applied AFTER mixing in all modes (manual and stabilized), same as v2.
+int MOTOR1_OFFSET_US = 0; // Front Right (CCW)
+int MOTOR2_OFFSET_US = 0; // Back  Right (CW)
+int MOTOR3_OFFSET_US = 0; // Front Left  (CW)
+int MOTOR4_OFFSET_US = 0; // Back  Left  (CCW)
 
 // ================================
 // Scaled Motor Mixing Function (Implements user-specified algorithm)
@@ -876,8 +822,6 @@ void setup()
     // Configure ADC attenuation for accurate battery measurements up to ~3.3V
     analogSetAttenuation(ADC_11db);
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
-    pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(BUZZER_PIN, LOW);
 
     // Initialize GPS (Serial2 on ESP32)
     Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -912,35 +856,6 @@ void setup()
 
     // Initialize real sensors
     initializeRealSensors();
-
-    // Initialize all VL53L0X sensors through PCA9548A (non-fatal if some absent)
-    bool anyToF = false;
-    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(400)) == pdTRUE)
-    {
-        for (uint8_t ch = 0; ch < TOF_COUNT; ++ch)
-        {
-            if (!selectToFChannel(ch))
-                continue;
-            delay(5); // Allow channel settle
-            if (tofSensors[ch].init())
-            {
-                tofSensors[ch].setTimeout(50);
-                // Use single-shot mode (readRangeSingleMillimeters) to avoid parallel continuous conflicts
-                anyToF = true;
-            }
-        }
-        // Return to channel 0 as default
-        selectToFChannel(0);
-        xSemaphoreGive(i2cMutex);
-    }
-    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(120)) == pdTRUE)
-    {
-        if (anyToF)
-            Serial.println("VL53L0X sensors initialized via PCA9548A multiplexer");
-        else
-            Serial.println("WARNING: No VL53L0X sensors detected (multiplexer channels 0-3)");
-        xSemaphoreGive(serialMutex);
-    }
 
     // Initialize IMU and PID controllers (IMU calibration will run here for faster startup)
     initializeIMUAndPID();
@@ -1133,19 +1048,12 @@ void sensorTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     // Run at 20Hz for smoother altitude updates; schedule slower sensors separately
-    const TickType_t loopFrequency = pdMS_TO_TICKS(50);                  // 20Hz
-    const TickType_t envFrequency = pdMS_TO_TICKS(1000);                 // 1Hz env sensors
-    const TickType_t gpsFrequency = pdMS_TO_TICKS(100);                  // 10Hz GPS
-    const TickType_t tofFrequency = pdMS_TO_TICKS(TOF_READ_INTERVAL_MS); // Target per-sensor cadence
+    const TickType_t loopFrequency = pdMS_TO_TICKS(50);  // 20Hz
+    const TickType_t envFrequency = pdMS_TO_TICKS(1000); // 1Hz env sensors
+    const TickType_t gpsFrequency = pdMS_TO_TICKS(100);  // 10Hz GPS
 
     TickType_t lastEnvRead = 0;
     TickType_t lastGPSRead = 0;
-    TickType_t lastTofRead = 0;
-    uint8_t currentToFChannel = 0; // Round-robin channel index
-
-    // Buzzer pulse state machine variables
-    bool buzzerOn = false;
-    unsigned long buzzerPhaseStart = millis();
 
     for (;;)
     {
@@ -1176,81 +1084,6 @@ void sensorTask(void *parameter)
             lastGPSRead = nowTicks;
         }
 
-        // Read one ToF sensor per interval (round-robin across channels)
-        if ((nowTicks - lastTofRead) >= tofFrequency)
-        {
-            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(8)) == pdTRUE)
-            {
-                if (selectToFChannel(currentToFChannel))
-                {
-                    delayMicroseconds(500); // Small settle time
-                    uint16_t d = tofSensors[currentToFChannel].readRangeSingleMillimeters();
-                    if (tofSensors[currentToFChannel].timeoutOccurred() || d == 0 || d > 4000)
-                    {
-                        // Keep previous value (stale) or mark invalid as 0
-                        // Optionally: tofDistancesMM[currentToFChannel] = 0;
-                    }
-                    else
-                    {
-                        tofDistancesMM[currentToFChannel] = d;
-                    }
-                }
-                xSemaphoreGive(i2cMutex);
-            }
-
-            // Advance channel
-            currentToFChannel = (currentToFChannel + 1) % TOF_COUNT;
-            lastTofRead = nowTicks;
-
-            // Compute minimum valid distance & update obstacle flag with hysteresis
-            uint16_t minD = 0; // 0 means none
-            for (uint8_t i = 0; i < TOF_COUNT; ++i)
-            {
-                uint16_t v = tofDistancesMM[i];
-                if (v == 0)
-                    continue;
-                if (minD == 0 || v < minD)
-                    minD = v;
-            }
-            minToFDistanceMM = minD;
-            if (!obstacleClose && minD > 0 && minD <= TOF_ALERT_DISTANCE_MM)
-                obstacleClose = true;
-            else if (obstacleClose && (minD == 0 || minD > TOF_CLEAR_DISTANCE_MM))
-                obstacleClose = false;
-        }
-
-        // Buzzer alert logic (non-blocking, simple pulse pattern while obstacle present)
-        if (obstacleClose)
-        {
-            unsigned long nowMs = millis();
-            if (buzzerOn)
-            {
-                if (nowMs - buzzerPhaseStart >= TOF_BUZZER_PULSE_MS)
-                {
-                    digitalWrite(BUZZER_PIN, LOW);
-                    buzzerOn = false;
-                    buzzerPhaseStart = nowMs; // Start rest phase
-                }
-            }
-            else
-            {
-                if (nowMs - buzzerPhaseStart >= TOF_BUZZER_REST_MS)
-                {
-                    digitalWrite(BUZZER_PIN, HIGH);
-                    buzzerOn = true;
-                    buzzerPhaseStart = nowMs; // Start pulse phase
-                }
-            }
-        }
-        else
-        {
-            if (buzzerOn)
-            {
-                digitalWrite(BUZZER_PIN, LOW);
-                buzzerOn = false;
-            }
-        }
-
         // Wait for next cycle
         vTaskDelayUntil(&xLastWakeTime, loopFrequency);
     }
@@ -1259,8 +1092,8 @@ void sensorTask(void *parameter)
 void radioTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    // Increase poll rate to 200Hz to minimize input-to-motor latency
-    const TickType_t radioFrequency = pdMS_TO_TICKS(5); // 200Hz radio check
+    // Increased poll rate to 500Hz to further minimize input-to-motor latency
+    const TickType_t radioFrequency = pdMS_TO_TICKS(2); // 500Hz radio check
 
     for (;;)
     {
@@ -1314,11 +1147,12 @@ void initializeRadio()
 
     // Use EXACT same configuration as remote
     radio.openReadingPipe(0, address);
-    radio.setPALevel(RF24_PA_HIGH);  // Match remote power level
-    radio.setDataRate(RF24_250KBPS); // Match remote data rate (can try 1MBPS for even lower air time)
-    radio.setChannel(110);           // Move away from common Wi-Fi channels to reduce interference
+    radio.setPALevel(RF24_PA_HIGH); // Match remote power level
+    // Switched to 1MBPS for lower on-air time and reduced latency (both sides must match)
+    radio.setDataRate(RF24_1MBPS);
+    radio.setChannel(110); // Move away from common Wi-Fi channels to reduce interference
     radio.setAutoAck(true);
-    radio.setRetries(3, 5); // Shorter retry delay/count for lower worst-case latency
+    radio.setRetries(3, 5); // Keep short retry delay/count for low worst-case latency
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -1338,11 +1172,11 @@ void initializeTelemetryData()
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
         telemetryData.temperature = 2500;  // 25.00°C
-        telemetryData.pressureX10 = 10132; // 1013.2 hPa -> x10
+        telemetryData.pressureX10 = 10132; // 101.32 kPa -> 1013.2 hPa
         telemetryData.humidity = 60;       // 60%
         telemetryData.battery = 3700;      // 3.7V
-        telemetryData.latitude = 0;
-        telemetryData.longitude = 0;
+        telemetryData.latitudeE7 = 0;
+        telemetryData.longitudeE7 = 0;
         telemetryData.satellites = 0;
         telemetryData.status = 0x01; // System OK
         telemetryData.lux = 500;     // 500 lux
@@ -1688,7 +1522,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-        localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
+        localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10);
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1902,8 +1736,9 @@ void readEnvironmentalSensors()
     // Get GPS data from shared telemetry (GPS is updated in its own function)
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        localTelemetry.latitude = telemetryData.latitude;
-        localTelemetry.longitude = telemetryData.longitude;
+        // Copy high precision GPS values directly
+        localTelemetry.latitudeE7 = telemetryData.latitudeE7;
+        localTelemetry.longitudeE7 = telemetryData.longitudeE7;
         localTelemetry.satellites = telemetryData.satellites;
 
         // Update all telemetry data atomically
@@ -1987,8 +1822,8 @@ void updateGPS()
                 // Update GPS data in shared telemetry
                 if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
                 {
-                    telemetryData.latitude = (int16_t)(gps.location.lat() * 100);
-                    telemetryData.longitude = (int16_t)(gps.location.lng() * 100);
+                    telemetryData.latitudeE7 = (int32_t)(gps.location.lat() * 10000000.0);
+                    telemetryData.longitudeE7 = (int32_t)(gps.location.lng() * 10000000.0);
                     telemetryData.satellites = gps.satellites.value();
                     xSemaphoreGive(telemetryMutex);
                 }
@@ -2007,8 +1842,8 @@ void updateGPS()
     {
         if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            telemetryData.latitude = 0;
-            telemetryData.longitude = 0;
+            telemetryData.latitudeE7 = 0;
+            telemetryData.longitudeE7 = 0;
             telemetryData.satellites = 0;
             xSemaphoreGive(telemetryMutex);
         }
@@ -2246,12 +2081,22 @@ void motorTask(void *parameter)
     }
 }
 
-// Calculate Motor Speeds from Control Inputs (single authoritative overload)
-// Implementation using a snapshot of control inputs
+// Calculate Motor Speeds from Control Inputs with PID Integration
+void calculateMotorSpeeds()
+{
+    // Backward-compatible wrapper using current global control (kept for any legacy calls)
+    ControlPacket cp;
+    if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(2)) == pdTRUE)
+    {
+        cp = receivedControl;
+        xSemaphoreGive(controlMutex);
+    }
+    calculateMotorSpeeds(cp);
+}
+
+// Latency-optimized variant using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
-    // Track previous state of toggle2 for edge detection (stabilize/manual) across calls
-    static bool lastModeToggle = false; // reflects last observed (receivedControl.toggle2==1) while armed
     // Check if motors should be armed (toggle switch 1 controls arming)
     if (receivedControl.toggle1 == 1)
     {
@@ -2286,12 +2131,11 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
                     xSemaphoreGive(serialMutex);
                 }
             }
-            // IMPORTANT: initialize lastModeToggle to current switch state so first post-arm change is detected
-            lastModeToggle = (receivedControl.toggle2 == 1);
         }
         else if (motorsArmed)
         {
             // Motors already armed - check for flight mode changes during flight
+            static bool lastModeToggle = false;
             bool currentModeToggle = (receivedControl.toggle2 == 1);
 
             if (currentModeToggle != lastModeToggle)
@@ -2417,8 +2261,7 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
         // Manual mode - use scaled mixer with dynamic saturation management
         // Normalize stick inputs (-3000..3000) -> (-1.0 .. 1.0)
         float Rn = constrain((receivedControl.roll / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
-        // Invert pitch normalization so positive stick command increases back motor thrust (nose-up)
-        float Pn = -constrain((receivedControl.pitch / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
+        float Pn = constrain((receivedControl.pitch / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
         float Yn = constrain((receivedControl.yaw / 3000.0f) * MANUAL_AXIS_GAIN, -1.0f, 1.0f);
         applyScaledMotorMix((float)baseThrottle, Rn, Pn, Yn);
         usedScaledMixing = true;
@@ -2828,9 +2671,8 @@ void pidControlTask(void *parameter)
                             // Roll stick mapping: positive stick -> positive roll angle
                             float rollSetpointRaw = map(receivedControl.roll, -3000, 3000,
                                                         -pidConfig.max_angle, pidConfig.max_angle);
-                            // Invert pitch setpoint mapping so positive stick yields positive nose-up angle
                             float pitchSetpointRaw = map(receivedControl.pitch, -3000, 3000,
-                                                         pidConfig.max_angle, -pidConfig.max_angle);
+                                                         -pidConfig.max_angle, pidConfig.max_angle);
 
                             // Slew limiting for roll/pitch setpoints (deg/sec)
                             float maxDeltaAngle = PID_SETPOINT_SLEW_ROLL_PITCH * (PID_LOOP_PERIOD / 1000.0f);
