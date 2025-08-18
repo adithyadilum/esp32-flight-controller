@@ -21,36 +21,37 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 - **Framework**: FreeRTOS with task-based scheduling ✅
 - **Servo Control**: Uses `ESP32Servo` library for PWM motor control ✅
-- **RF Communication**: NRF24L01 at 5Hz with ACK payload telemetry ✅
-- **Motor Control**: X-configuration mixing with dynamic saturation scaling (no pre-reserved headroom) ✅
-- **PID Controller**: `SimplePID` planned for implementation:
-  - Roll stabilization (next priority)
-  - Pitch stabilization (next priority)
-  - Yaw control (optional)
-- **Sensor Integration**: MPU6050 gyro/accelerometer integration needed
+- **RF Communication**: NRF24L01 optimized – control polling ~500Hz (radio loop), telemetry ACK updates throttled ✅
+- **Motor Control**: Unified X-configuration mixer with dynamic dual-side scaling (no fixed headroom) ✅
+- **PID Controller**: Advanced custom controller (not SimplePID) implemented with:
+  - Output limits (Roll/Pitch ±400 µs, Yaw ±200 µs)
+  - Integral gating (throttle-based) & leak (bias bleed)
+  - Derivative input low-pass filtering
+  - Setpoint smoothing & slew limiting (roll/pitch angle, yaw rate)
+  - Optional cascaded Angle→Rate loop (disabled by default)
+  - Yaw feed-forward term
+- **Sensor Integration**: MPU6050 fused via complementary filter (Kalman optional) with 90° CW Z-axis rotation compensation ✅
 
 ---
 
 ## 📡 Communication Strategy
 
 - ✅ **Phase 1 Complete**: Control & telemetry via WiFi dashboard
-- ✅ **Phase 2 Complete**: **RF remote control** via NRF24L01 module
-- ✅ **Phase 3 Complete**: **Telemetry transmission** to remote using **NRF24L01 acknowledgment payloads**
-- ⬜ **Phase 4 Next**: **PID stabilization** with RF remote parameter tuning
+- ✅ **Phase 2 Complete**: RF remote control (low-latency path tuned)
+- ✅ **Phase 3 Complete**: Telemetry via NRF24 ACK payloads (legacy 22B stable / 30B dev)
+- ✅ **Phase 4**: PID stabilization & advanced control features active (development & WiFi builds unified)
 
 > 🛰️ **Current Status**: Full RF communication system operational! Remote sends control commands at 5Hz, drone responds with real-time telemetry via ACK payloads. System includes comprehensive sensor data, motor arming controls, and emergency stop functionality.
 
 ---
 
-## ⬆️ Altitude / Base Throttle Strategy
+## ⬆️ Altitude / Base Throttle & Mixer Strategy
 
-- **Lift-off Threshold**: Motors begin lifting frame at ~1550–1600 µs (battery dependent)
-- **Base Throttle Mapping**: User throttle always maps full idle→max range (no pre-reserved correction margin).
-- **Dynamic Mixer Scaling**: Differential roll/pitch/yaw corrections are scaled only when they would saturate an ESC output.
-- **Altitude Correction Overlay**: Altitude PID (0..1000) is centered to (−1..+1) and mapped to ±300 µs, added after base throttle mapping, then clamped.
-- **Altitude Source**:
-  - Pre GPS lock: Barometric (BME280)
-  - After reliable GPS (≥4 sats): GPS altitude blending planned
+- **Lift-off Threshold**: ~1550–1600 µs (pack & weight dependent)
+- **Full-Range Base**: Always map throttle directly to 1000–2000 µs; no static authority reservation.
+- **Dynamic Dual Scaling**: Mixer computes raw mixes then applies s_pos / s_neg scaling to prevent saturation symmetrically.
+- **Altitude Hold (dev)**: Adds centered correction (±300 µs window) post base mapping (future blending with GPS altitude).
+- **Altitude Source Roadmap**: Baro primary now; GPS fusion planned after stable yaw heading solution.
 
 ---
 
@@ -67,16 +68,20 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 ---
 
-## 🛠️ Development Notes
+## 🛠️ Development Notes (Updated Aug 18, 2025)
 
 - ✅ **ESC Control**: Motors respond to joystick inputs with X-configuration mixing and per-cycle dynamic scaling
 - ✅ **RF Communication**: 5Hz control loop with telemetry feedback operational
 - ✅ **Joystick Sensitivity**: Tuned to ±3000 range for precise flight control
 - ✅ **Safety Systems**: Toggle switch arming, emergency stop, control timeout protection
-- ⬜ **Next Phase**: Begin PID tuning with P term → then add D → finally add I
-- ⬜ **PID Testing**: Real-time parameter adjustment via RF remote controls
-- ⬜ **Stabilization**: Implement MPU6050 feedback for roll/pitch/yaw control
-- ⬜ **Flight Testing**: Progressive testing from basic lift to full stabilization
+- ✅ Advanced PID (P+I+D with gating, leak, filtering) implemented & active
+- ✅ IMU rotation (90° CW about Z) compensated in both RF & WiFi builds
+- ✅ GPS precision upgrade (dev build latitudeE7 / longitudeE7 int32 scaling \*1e7)
+- ✅ Mixer & PID output normalization identical across builds (validated equivalence)
+- ✅ Low-latency radio loop tuning (≈500Hz polling)
+- 🔄 Yaw absolute heading & magnetometer integration (pending)
+- 🔄 Telemetry versioning (introduce packet schema version byte) (pending)
+- 🔄 High-rate lightweight debug stream toggle (pending)
 
 ---
 
@@ -91,7 +96,9 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 - ✅ **Comprehensive telemetry system** - BME280, GPS, air quality sensors
 - ✅ **Joystick sensitivity tuning** - ±3000 range for precise control
 - ✅ **ESC calibration on power-on** - Immediate MAX→MIN calibration sequence
-- ⬜ **Implement PID stabilization** - Next critical milestone (mixer path already unified)
+- ✅ Implement PID stabilization with advanced controller features
+- ✅ Cross-build IMU & mixer parity
+- 🔄 Yaw drift mitigation improvements
 
 ---
 
@@ -130,9 +137,38 @@ Advantages:
 
 Future Enhancements:
 
-- Telemetry export of s_pos / s_neg and raw mixes
-- Adaptive gain scheduling w.r.t battery voltage
-- Optional minimal reserved authority band for aggressive acro tuning
-- ⬜ **PID tuning with RF remote** - Real-time PID parameter adjustment
-- ⬜ **Add MPU6050 integration** - Gyro/accelerometer for stabilization
-- ⬜ **Add dynamic altitude hold and GPS switching logic**
+- Telemetry export of s_pos / s_neg and raw mixes (diagnostics)
+- Adaptive gain scheduling vs battery sag
+- Optional minimal reserved authority reserve for aggressive acro
+- Packet version byte for dev/stable compatibility
+- Yaw heading fusion & magnetometer integration
+- Altitude fusion (baro + GPS + future ToF blend)
+
+---
+
+## 🆕 IMU Rotation & Calibration Handling
+
+The MPU6050 board was rotated 90° clockwise about the Z-axis. The firmware applies a deterministic remap before fusion and transforms saved calibration offsets into the body frame:
+
+```
+bodyX = sensorY
+bodyY = -sensorX
+bodyZ = sensorZ
+rollRate  = gyroY
+pitchRate = -gyroX
+yawRate   = gyroZ
+```
+
+Calibration samples are captured in sensor frame; offsets are projected into body frame prior to subtraction. This prevents introducing artificial bias after rotation. Complementary (default) and optional Kalman filters are seeded after calibration to eliminate startup bias.
+
+---
+
+## 🆕 High-Precision GPS Telemetry (Development Branch)
+
+Legacy telemetry used int16 latitude/longitude *100 (≈1e-2°). Development build upgrades to int32 latitudeE7/longitudeE7 (degrees *1e7) reaching centimeter-scale resolution. Stable branch left unchanged to avoid incompatibility with existing remote firmware until a packet versioning mechanism is introduced.
+
+---
+
+## 🧪 PID Output & Mixer Equivalence Across Builds
+
+Code audit confirmed that, under identical constants (MIX_KR/KP/KY, PID limits, yaw feed-forward), both RF (`droneFreeRTOS.ino`) and WiFi (`flight_controller-v2.cpp`) builds produce identical post-PID motor PWM outputs. Any divergence stems only from enabled optional features (cascaded mode, yaw FF differences, altitude correction) or differing runtime tunables.

@@ -1287,12 +1287,18 @@ void updateSensors()
 
     if (imu_success && xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
     {
-        sensorData.accel_x = accel.acceleration.x;
-        sensorData.accel_y = accel.acceleration.y;
+        // Board physically rotated 90° CW about Z (looking down). Mapping:
+        // bodyX (forward)   = sensorY
+        // bodyY (right)     = -sensorX
+        // bodyZ (up)        = sensorZ
+        // roll (about X)    = gyro Y
+        // pitch (about Y)   = -gyro X
+        // yaw (about Z)     = gyro Z
+        sensorData.accel_x = accel.acceleration.y;
+        sensorData.accel_y = -accel.acceleration.x;
         sensorData.accel_z = accel.acceleration.z;
-        // Roll rate: removed previous inversion (was negated) to correct inverted roll response
-        sensorData.roll_rate = gyro.gyro.x * 180.0 / PI;
-        sensorData.pitch_rate = gyro.gyro.y * 180.0 / PI;
+        sensorData.roll_rate = gyro.gyro.y * 180.0 / PI;
+        sensorData.pitch_rate = -gyro.gyro.x * 180.0 / PI;
         sensorData.yaw_rate = gyro.gyro.z * 180.0 / PI;
         xSemaphoreGive(sensorMutex);
     }
@@ -1392,22 +1398,34 @@ void calculateOrientation()
         return; // Skip this update if we can't get sensor data
     }
 
-    // Apply IMU calibration offsets if calibrated
+    // Apply IMU calibration offsets (note: sensor physically rotated 90° CW about Z)
+    // Stored offsets are in raw sensor frame (sensorX, sensorY, sensorZ).
+    // Mapping applied earlier: bodyX = sensorY, bodyY = -sensorX, bodyZ = sensorZ
     if (imuCal.calibrated)
     {
-        accel_x -= imuCal.accel_x_offset;
-        accel_y -= imuCal.accel_y_offset;
-        accel_z -= imuCal.accel_z_offset;
-        // Subtract stored gyro biases (convert stored rad/s to deg/s)
-        gyro_roll -= (imuCal.gyro_x_offset * 180.0 / PI);
-        gyro_pitch -= (imuCal.gyro_y_offset * 180.0 / PI);
+        // Accelerometer: transform offsets into body frame before subtraction
+        float body_accel_x_offset = imuCal.accel_y_offset;  // bodyX uses sensorY
+        float body_accel_y_offset = -imuCal.accel_x_offset; // bodyY uses -sensorX
+        float body_accel_z_offset = imuCal.accel_z_offset;  // unchanged
+        accel_x -= body_accel_x_offset;
+        accel_y -= body_accel_y_offset;
+        accel_z -= body_accel_z_offset;
+
+        // Gyroscope: body roll rate from sensorY, body pitch rate from -sensorX
+        float body_gyro_roll_offset_deg = imuCal.gyro_y_offset * 180.0 / PI;   // sensorY -> roll
+        float body_gyro_pitch_offset_deg = -imuCal.gyro_x_offset * 180.0 / PI; // -sensorX -> pitch
+        gyro_roll -= body_gyro_roll_offset_deg;
+        gyro_pitch -= body_gyro_pitch_offset_deg;
     }
 
     // Calculate angles from accelerometer
     // Fix roll axis to match physical tilt direction
     // Remove leading negative to align roll angle sign with control input (previous sign caused inverted response)
-    float accel_roll = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;
-    float accel_pitch = atan2(-accel_x, sqrt(accel_y * accel_y + accel_z * accel_z)) * 180.0 / PI;
+    // After 90° CW rotation about Z: bodyX=sensorY, bodyY=-sensorX.
+    // Keep roll = tilt about bodyX, pitch = tilt about bodyY (standard aerospace).
+    // Use transformed accel_x/accel_y that already represent body axes.
+    float accel_roll = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;   // roll from bodyY
+    float accel_pitch = atan2(-accel_x, sqrt(accel_y * accel_y + accel_z * accel_z)) * 180.0 / PI; // pitch from bodyX
 
     // Apply calibration offsets to get relative angles from level position
     // Do not subtract additional angle offsets here; accelerometer biases are already

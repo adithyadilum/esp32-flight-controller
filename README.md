@@ -1,79 +1,81 @@
 # 🚁 ESP32 Flight Controller
 
-**Advanced quadcopter flight controller firmware featuring comprehensive sensor integration, RF remote control, and real-time telemetry systems.**
+Advanced quadcopter flight controller firmware featuring comprehensive sensor integration, low‑latency RF control, high‑precision telemetry (dev), and extensible stabilization architecture.
 
 [![Platform](https://img.shields.io/badge/platform-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![Framework](https://img.shields.io/badge/framework-Arduino-green.svg)](https://www.arduino.cc/)
-[![License](htt- **🚁 [firmware/](firmware/)** - Stable and development firmware versions
+[![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-Dev%20Stabilization%20Phase-orange.svg)](docs/PROJECT_PROGRESS.md)
 
-- **✅ [stable/drone/](firmware/stable/drone/)** - Production-ready drone firmware
-- **✅ [stable/remote/](firmware/stable/remote/)** - Production-ready remote firmware
-- **🔬 [development/drone/](firmware/development/drone/)** - PID integration development
-- **🔬 [development/remote/](firmware/development/remote/)** - Enhanced features developmentimg.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
-  [![Status](https://img.shields.io/badge/status-Motor%20Control%20Operational-success.svg)](docs/PROJECT_PROGRESS.md)
+---
+
+## 🆕 August 18, 2025 – Latest Development Highlights
+
+| Area                | Update                                                                                                          | Impact                                      |
+| ------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| Control Latency     | Radio polling tightened to ~2ms (≈500Hz) + NRF24 @1Mbps                                                         | Lower stick→motor delay, reduced jitter     |
+| IMU Orientation     | 90° CW Z-axis rotation compensated (axis remap + bias transform)                                                | Correct roll/pitch alignment, drift removed |
+| GPS Precision (Dev) | latitudeE7 / longitudeE7 (int32 *1e7) replacing int16 *100                                                      | ~1 cm positional resolution (dev builds)    |
+| PID Controller      | Integral gating, leak, derivative filtering, setpoint smoothing, yaw feed-forward, optional cascaded Angle→Rate | Smoother attitude & crisper yaw             |
+| Mixer               | Unified dual‑sided dynamic scaling across RF & WiFi builds                                                      | Identical tuning cross-build                |
+| Logging             | Clarified status print throttling vs high‑rate loops                                                            | Prevents false latency conclusions          |
+| Equivalence Audit   | Post-PID PWM parity verified between transport variants                                                         | Cross-platform confidence                   |
+
+Temporary Dev vs Stable Telemetry divergence:
+
+| Field        | Stable (legacy)      | Development (Aug 18)       |
+| ------------ | -------------------- | -------------------------- |
+| Latitude     | int16 \*100 (≈0.01°) | int32 latitudeE7 (° \*1e7) |
+| Longitude    | int16 \*100          | int32 longitudeE7          |
+| Packet Size  | 22 bytes             | 30 bytes                   |
+| Version Byte | (none)               | Planned (before promotion) |
+
+Stable retains legacy packet until a version byte enables backward-compatible upgrade.
+
+See also: `docs/PROJECT_PROGRESS.md` & `docs/CURRENT_STATUS_AUGUST_18.md`.
+
+---
 
 ## 📋 Table of Contents
 
 - [Overview](#overview)
-- [Features](#features)
+- [Features](#✨-features)
 - [Project Structure](#project-structure)
-- [Hardware Specifications](#hardware-specifications)
-- [Pin Configuration](#pin-configuration)
-- [Communication Protocols](#communication-protocols)
-- [Installation](#installation)
-- [Usage](#usage)
-- [System Architecture](#system-architecture)
-- [Contributing](#contributing)
-- [License](#license)
+- [Hardware Specifications](#-hardware-specifications)
+- [Pin Configuration](#-pin-configuration)
+- [Communication Protocols](#-communication-protocols)
+- [Power Management](#-power-management)
+- [Status Indication](#-status-indication-system)
+- [System Architecture](#-system-architecture)
+- [Flight Control Modes](#-flight-control-modes)
+- [Installation](#-installation)
+- [Usage](#-usage)
+- [Development Status](#-development-status)
+- [Directory Navigation](#-directory-navigation)
+- [Contributing](#-contributing)
+- [License](#-license)
 
-## 🔍 Overview
+## Overview
 
-This project implements a sophisticated flight controller for a custom quadcopter using the ESP32 microcontroller. The system features advanced sensor fusion, RF remote control, comprehensive telemetry, and FreeRTOS-based multi-threading architecture for real-time flight control operations.
+ESP32-based quadcopter controller featuring multi-rate FreeRTOS tasking, advanced dynamic motor mixing, modular telemetry, and progressive stabilization features suitable for experimentation and extension.
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 esp32-flight-controller/
-├── 📁 firmware/              # Firmware organized by stability
-│   ├── 📁 stable/            # Production-ready firmware
-│   │   ├── 📁 drone/         # Stable drone firmware
-│   │   │   └── droneFreeRTOS.ino # ✅ Stable production firmware
-│   │   └── 📁 remote/        # Stable remote firmware
-│   │       ├── remoteControllerStable.ino  # ✅ Stable remote controller
-│   │       └── FastControlRemote.ino       # Alternative stable remote
-│   └── 📁 development/       # Development firmware
-│       ├── 📁 drone/         # Development drone firmware
-│       │   └── droneFreeRTOS.ino # 🔬 Development version for PID integration
-│       └── 📁 remote/        # Development remote firmware
-│           ├── remoteControllerStable.ino  # 🔬 Development remote
-│           └── FastControlRemote.ino       # Alternative development remote
-│
-├── 📁 docs/                  # Project documentation
-│   ├── PROJECT_PROGRESS.md   # Development progress tracking
-│   ├── PIDControl.md         # PID control documentation
-│   └── FLIGHT_MODE_CONTROL.md # Flight mode switching system guide
-│
-├── 📁 examples/              # Test programs and examples
-│   ├── 📁 sensor_tests/      # Individual sensor test programs
-│   │   ├── BMP280.cpp        # Environmental sensor testing
-│   │   ├── MPU6050.cpp       # IMU sensor testing
-│   │   ├── gps_test.cpp      # GPS module testing
-│   │   └── ...
-│   └── 📁 component_tests/   # System component testing
-│       ├── motor_test.cpp    # ESC/motor testing
-│       └── Wifi Control.cpp  # WiFi testing
-│
-├── 📁 tools/                 # Development utilities
-│   └── web_dashboard.cpp     # Web-based control interface
-│
-├── 📁 hardware/              # Hardware specs and diagrams (planned)
-│
-├── 📁 archive/               # Legacy versions and deprecated code
-│   └── 📁 legacy_versions/   # Previous firmware implementations
-│
-├── 📁 lib/                   # Project-specific libraries
-├── 📁 include/               # Header files
-├── 📁 src/                   # Source files (main.cpp)
+├── firmware/                 # Stable & development firmware
+│   ├── stable/               # Production-ready (legacy telemetry packet)
+│   │   ├── drone/
+│   │   └── remote/
+│   └── development/          # Active development (high precision GPS, advanced PID)
+│       ├── drone/
+│       └── remote/
+├── docs/                     # Technical & status documentation
+├── examples/                 # Sensor / component tests
+├── tools/                    # Utilities (web dashboard, etc.)
+├── hardware/                 # Hardware references (in progress)
+├── archive/                  # Legacy & deprecated versions
+├── src/                      # PlatformIO src (main.cpp)
 └── platformio.ini            # Build configuration
 ```
 
@@ -81,422 +83,208 @@ esp32-flight-controller/
 
 ### 🎮 RF Remote Control System
 
-- **Direct joystick control** with dual analog joysticks
-- **X-configuration motor mixing** with dynamic saturation scaling (no pre-reserved headroom)
-- **5Hz control transmission** for responsive real-time control
-- **Toggle switch arming system** with flight mode switching (Stabilized/Manual)
-- **Flight mode control**: Stabilized mode with PID control and Manual mode for direct control
-- **ACK payload telemetry** for live sensor feedback
+- Dual analog joystick inputs (throttle/yaw + pitch/roll)
+- X-configuration motor mixing with dual‑sided dynamic scaling (no pre-reserved headroom)
+- ~5Hz remote transmission; firmware side polls radio ~500Hz for ultra‑low latency application
+- Toggle-based arming & flight mode selection
+- ACK payload telemetry return path
 
 ### 🧠 Advanced Flight Control
 
-- **FreeRTOS multi-threading** with dedicated motor control task
-- **50Hz motor updates** for smooth ESC control
-- **Immediate ESC calibration** on power-up
-- **Safety systems** including control timeout and arming protection
-- **Unified mixer algorithm**: Manual and PID modes both use full 1000–2000 µs throttle span; differential roll/pitch/yaw corrections are dynamically scaled only when they would saturate an ESC.
-- **No pre-reserved headroom**: Maximum lift always available; mixer computes per-cycle positive/negative scaling factors (s_pos / s_neg) to keep authority while preventing clipping.
-- **Altitude correction overlay**: Applied after throttle mapping (±300 µs window) and included in saturation scaling automatically.
-- **Dual flight modes**: Stabilized (PID-assisted) and Manual (direct control) modes
+- 50Hz PID + motor loop, 100Hz IMU sampling, ~500Hz radio polling
+- Immediate ESC calibration & enforced PWM range
+- Safety: arming interlocks, control timeout, sensor freshness checks
+- PID features: integral gating (throttle-based), integrator leak, derivative filtering, setpoint smoothing, yaw feed-forward, optional cascaded Angle→Rate (experimental)
+- Unified mixer: Full 1000–2000 µs throttle span; dual-scale factors (s_pos / s_neg) clamp only the saturated side
+- Altitude correction overlay (prototype): ±300 µs additive window auto-scaled in mixer
+- Manual + Stabilized modes (Altitude Hold experimental)
 
 ### 📡 Comprehensive Sensor Suite
 
-- **Environmental monitoring**: Temperature, humidity, pressure, air quality
-- **Navigation sensors**: GPS positioning, IMU orientation, altitude tracking
-- **Obstacle detection**: 4x Time-of-Flight sensors with I2C multiplexing
-- **Light monitoring**: UV index and ambient light measurement
-- **Battery monitoring**: Real-time voltage and percentage tracking
+- Environmental: Pressure, humidity, temperature, air quality
+- Navigation: GPS (high precision in dev), IMU (90° rotation compensated), barometric altitude
+- Obstacle: Up to 4x VL53L0X via I2C multiplexer
+- Light & UV sensing
+- Battery voltage monitoring
 
 ### 🌐 Connectivity & Telemetry
 
-- **NRF24L01+ PA+LNA** for long-range RF communication
-- **WiFi connectivity** for web dashboard access
-- **Real-time telemetry** with 2-decimal precision altitude tracking
-- **Data logging** with Firebase integration
-- **Web-based control interface** for testing and configuration
+- NRF24L01+ PA+LNA (1 Mbps dev / range-focused lower rates stable)
+- WiFi (dashboard / alternate control experiments)
+- Telemetry: legacy int16\*100 or dev high-precision latitudeE7/longitudeE7
+- Planned: versioned telemetry framing
 
-## �️ Flight Mode System
+## 🧭 Flight Mode System
 
-The drone features a dual flight mode system for enhanced control flexibility:
+- Manual Mode: Direct joystick inputs → mixer
+- Stabilized Mode: PID-stabilized roll/pitch/yaw through identical mixer path
+- Altitude Hold: Barometric additive correction (prototype)
+- Seamless in-flight mode switching
 
-### Flight Mode Controls
+## 🔧 Hardware Specifications
 
-- **Toggle 1:** ARM/DISARM (primary safety control)
-- **Toggle 2:** Flight Mode Selection (Stabilized/Manual)
+| Component       | Model                   | Purpose                |
+| --------------- | ----------------------- | ---------------------- |
+| Microcontroller | ESP32 (dual-core)       | Flight control & tasks |
+| RF Module       | NRF24L01+ PA+LNA        | Control & telemetry    |
+| GPS             | NEO-6M                  | Positioning            |
+| IMU             | MPU6050                 | Attitude sensing       |
+| Baro/Env        | BME280 / AHT21 / ENS160 | Altitude & environment |
+| Light           | BH1750                  | Ambient light          |
+| UV              | GUVA-S12SD              | UV index               |
+| Distance        | VL53L0X (multiplexed)   | Obstacle ranging       |
 
-### Available Flight Modes
+## 📌 Pin Configuration (Excerpt)
 
-#### 🎯 Manual Mode (Toggle 2 OFF)
-
-- **Direct stick control** with no stabilization assistance
-- **PID controllers disabled** for maximum control authority
-- **Best for:** Experienced pilots, advanced maneuvers, acrobatic flight
-
-#### 🛡️ Stabilized Mode (Toggle 2 ON)
-
-- **PID-assisted flight** with automatic self-leveling
-- **Roll, pitch, and yaw stabilization** for smooth control
-- **Best for:** New pilots, stable photography, hover operations
-
-### Real-time Mode Switching
-
-- Switch between modes **during flight** for optimal control
-- Seamless transitions with no motor interruption
-- Current mode displayed in **telemetry output**
-- Mode changes **logged to serial console** for monitoring
-
-**📖 Complete Documentation:** See [FLIGHT_MODE_CONTROL.md](docs/FLIGHT_MODE_CONTROL.md) for detailed operation guide
-
-## �🔧 Hardware Specifications
-
-### 🎯 Main Controller
-
-| Component           | Model                      | Purpose                                          |
-| ------------------- | -------------------------- | ------------------------------------------------ |
-| **Microcontroller** | ESP32 NodeMCU ESP-WROOM-32 | Main flight controller with dual-core processing |
-
-### 📡 Communication Modules
-
-| Component     | Model            | Interface | Purpose                               |
-| ------------- | ---------------- | --------- | ------------------------------------- |
-| **RF Module** | NRF24L01+ PA+LNA | SPI       | Long-range remote control & telemetry |
-| **GPS**       | NEO-6M           | UART      | Position tracking and navigation      |
-| **WiFi**      | Built-in ESP32   | -         | Web dashboard and configuration       |
-
-### 🔬 Sensor Array
-
-| Sensor              | Model          | Interface           | Measurement                      |
-| ------------------- | -------------- | ------------------- | -------------------------------- |
-| **IMU**             | MPU6050        | I2C (0x68)          | Gyroscope + Accelerometer        |
-| **Environmental**   | BME280         | I2C (0x76/0x77)     | Pressure, temperature, humidity  |
-| **Air Quality**     | ENS160 + AHT21 | I2C                 | CO₂, TVOC, temperature, humidity |
-| **Light**           | BH1750         | I2C                 | Ambient light intensity          |
-| **UV Sensor**       | GUVA-S12SD     | Analog              | UV index monitoring              |
-| **Distance**        | 4x VL53L0X     | I2C via Multiplexer | Obstacle detection               |
-| **I2C Multiplexer** | PCA9548A       | I2C (0x70)          | Sensor channel switching         |
-
-### ⚡ Power & Control
-
-| Component   | Purpose             | Specifications                    |
-| ----------- | ------------------- | --------------------------------- |
-| **ESCs**    | Motor speed control | 4x Brushless ESC with PWM control |
-| **Motors**  | Propulsion          | EMAX 980KV brushless motors       |
-| **Battery** | Power supply        | 3S LiPo with voltage monitoring   |
-| **LEDs**    | Navigation lights   | RGB status indicators             |
-| **Buzzer**  | Audio feedback      | Status and alert sounds           |
-
-## 📌 Pin Configuration
-
-### 🎮 Remote Controller Pins
-
-| Function            | Component | GPIO Pin | Notes                           |
-| ------------------- | --------- | -------- | ------------------------------- |
-| **Joystick 1 X**    | Analog    | GPIO 39  | Primary control stick           |
-| **Joystick 1 Y**    | Analog    | GPIO 36  | Primary control stick           |
-| **Joystick 1 BTN**  | Digital   | GPIO 33  | Button (not functioning well)   |
-| **Joystick 2 X**    | Analog    | GPIO 34  | Secondary control stick         |
-| **Joystick 2 Y**    | Analog    | GPIO 35  | Secondary control stick         |
-| **Joystick 2 BTN**  | Digital   | GPIO 32  | Button input                    |
-| **Toggle Switch 1** | Digital   | GPIO 27  | ARM/DISARM control              |
-| **Toggle Switch 2** | Digital   | GPIO 14  | Flight mode (Stabilized/Manual) |
-
-### 🚁 Drone Controller Pins
-
-#### Motor Control (ESC PWM Outputs)
-
-| Motor       | Position          | GPIO Pin | ESC Connection   |
-| ----------- | ----------------- | -------- | ---------------- |
-| **Motor 1** | Front Right (CCW) | GPIO 13  | ESC1 signal wire |
-| **Motor 2** | Back Right (CW)   | GPIO 12  | ESC2 signal wire |
-| **Motor 3** | Front Left (CW)   | GPIO 14  | ESC3 signal wire |
-| **Motor 4** | Back Left (CCW)   | GPIO 27  | ESC4 signal wire |
-
-#### Communication Interfaces
-
-| Interface           | Component | GPIO Pins                                  | Configuration                            |
-| ------------------- | --------- | ------------------------------------------ | ---------------------------------------- |
-| **SPI (NRF24L01+)** | RF Module | CE: 4, CSN: 5, SCK: 18, MOSI: 23, MISO: 19 | Channel 76 (WiFi interference avoidance) |
-| **I2C Bus**         | Sensors   | SDA: 21, SCL: 22                           | Shared bus with pull-up resistors        |
-| **UART**            | GPS       | RX: 16                                     | GPS data reception                       |
-
-#### Sensor Connections
-
-| Sensor Type         | GPIO Pin | Interface  | Purpose               |
-| ------------------- | -------- | ---------- | --------------------- |
-| **UV Sensor**       | GPIO 36  | Analog ADC | UV index measurement  |
-| **Battery Monitor** | GPIO 35  | Analog ADC | Voltage divider input |
-
-#### Status Indicators
-
-| LED Position     | Color | GPIO Pin | Function         |
-| ---------------- | ----- | -------- | ---------------- |
-| **Front Right**  | Green | GPIO 32  | Navigation light |
-| **Back Right**   | Green | GPIO 33  | Navigation light |
-| **Back Left**    | Red   | GPIO 25  | Navigation light |
-| **Front Center** | White | GPIO 17  | Status indicator |
-| **Front Left**   | Red   | GPIO 02  | Navigation light |
-| **Back Center**  | White | GPIO 15  | Status indicator |
-| **Buzzer**       | Audio | GPIO 26  | Alert sounds     |
+See prior revisions for full mapping; representative connections retained (SPI: CE4 CSN5 SCK18 MOSI23 MISO19, I2C: SDA21 SCL22, GPS UART RX16).
 
 ## 📡 Communication Protocols
 
-### 📻 NRF24L01+ RF Communication
-
-- **Frequency**: 2.4GHz, Channel 76 (WiFi interference avoidance)
-- **Data Rate**: 250KBPS for maximum range
-- **Power Level**: RF24_PA_HIGH for extended range
-- **Control Rate**: 5Hz transmission (200ms intervals)
-- **Protocol**: ACK payload for bidirectional communication
-- **Range**: Extended range with PA+LNA amplifier
-
-### 🔄 I2C Sensor Bus
-
-- **Bus Speed**: Standard 100kHz
-- **Pull-up Resistors**: 4.7kΩ on SDA/SCL lines
-- **Multiplexing**: PCA9548A for multiple VL53L0X sensors
-- **Device Addresses**:
-  - PCA9548A: 0x70
-  - BME280: 0x76/0x77
-  - MPU6050: 0x68
-
-### 🌐 WiFi Connectivity
-
-- **Mode**: Station mode for web dashboard
-- **Security**: WPA2 encryption
-- **Purpose**: Configuration interface and telemetry viewing
+- NRF24L01+: Channel 76, dynamic poll architecture; dev uses 1 Mbps for latency
+- I2C: Standard 100kHz (multiplexed for VL53L0X set)
+- WiFi: Station mode (dashboard/testing)
 
 ## 🔋 Power Management
 
-### Battery Monitoring System
+- 3S LiPo monitored via precision divider
+- Filtered 3.3V rail for RF module and sensors
+- ESC supply isolated from logic noise paths
 
-The system monitors a 3S LiPo battery using a precision voltage divider:
+## 🔔 Status Indication System
 
-**Voltage Divider Configuration:**
-
-- **R1 (Top)**: 30kΩ (3x 10kΩ in series)
-- **R2 (Bottom)**: 7.5kΩ (parallel combination of 30kΩ and 10kΩ)
-- **Divider Ratio**: 0.2 (scales 12.6V max to 2.52V)
-
-**ADC Conversion:**
-
-```cpp
-float vOut = (adcReading / 4095.0) * 3.3;  // ESP32 12-bit ADC
-float batteryVoltage = vOut * 5.0;         // Scale back to actual voltage
-```
-
-### Power Distribution
-
-- **5V Rail**: Regulated supply for motors and high-power components
-- **3.3V Rail**: ESP32 and sensor power with dedicated filtering
-- **NRF24L01**: Dedicated filtered 3.3V supply (not from ESP32)
-
-## � Status Indication System
-
-### Navigation Lights
-
-| Position        | Color | Behavior  | Purpose              |
-| --------------- | ----- | --------- | -------------------- |
-| **Front Left**  | Red   | Always ON | Port navigation      |
-| **Front Right** | Green | Always ON | Starboard navigation |
-| **Back Left**   | Red   | Always ON | Port navigation      |
-| **Back Right**  | Green | Always ON | Starboard navigation |
-
-### Status Lights
-
-| Position         | Color | Behavior   | Indication         |
-| ---------------- | ----- | ---------- | ------------------ |
-| **Front Center** | White | Slow blink | Waiting to arm     |
-| **Front Center** | White | Solid      | Flight mode active |
-| **Back Center**  | White | Variable   | System status      |
-
-### Audio Feedback
-
-- **Buzzer**: Status alerts and system notifications
-- **Boot Sequence**: Confirmation sounds during initialization
-- **Error Alerts**: Audio warnings for system issues
+- Navigation LEDs (port/starboard + orientation)
+- White status LEDs (arming / mode)
+- Buzzer alerts (boot, errors, arming confirmation)
 
 ## 🏗️ System Architecture
 
-### FreeRTOS Task Structure
+### FreeRTOS Task Structure (Representative – Dev Build)
 
-| Task                 | Core   | Priority | Frequency | Purpose                       |
-| -------------------- | ------ | -------- | --------- | ----------------------------- |
-| **Motor Control**    | Core 1 | 4 (High) | 50Hz      | ESC PWM updates               |
-| **RF Communication** | Core 0 | 3        | 5Hz       | Remote control data           |
-| **Sensor Reading**   | Core 0 | 2        | 10Hz      | IMU and environmental sensors |
-| **Status Updates**   | Core 0 | 1        | 1Hz       | LED and buzzer control        |
+| Task              | Core | Priority | Frequency                   | Purpose                     |
+| ----------------- | ---- | -------- | --------------------------- | --------------------------- |
+| PID / Motor Loop  | 1    | 4 (High) | 50Hz                        | Stabilization + ESC PWM     |
+| Radio Poll        | 1    | 3        | ~500Hz                      | Low-latency packet handling |
+| IMU / Sensor Read | 0    | 2        | 100Hz IMU / mixed env rates | Orientation & environment   |
+| Status Updates    | 0    | 1        | 0.1–1Hz                     | Throttled diagnostics       |
 
-### Flight Control Logic
+### Flight Control Logic (Conceptual)
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   RF Remote     │───▶│  Flight Control  │───▶│   Motor Mixing  │
-│   Joystick      │    │   Processing     │    │  (X-Config)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                │                        │
-                                ▼                        ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Sensor Data   │───▶│  PID Control     │    │   ESC Control   │
-│  (IMU, Altitude)│    │   (Future)       │    │   (50Hz PWM)    │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+Joysticks → Radio → (Poll) → Control Task → PID (Stabilized) → Dynamic Mixer → ESC PWM
+                                 ↑                │
+                              Sensors (IMU, Baro, GPS dev)
 ```
-
-## 🎮 Flight Control Modes
 
 ### Current Implementation
 
-- **Manual Mode**: Direct joystick → mixer (full range) with dynamic saturation scaling
-- **Stabilized Mode**: PID outputs normalized by mixer gains (roll/pitch/yaw) → same mixer path for identical feel and authority
-- **Altitude Hold (in progress)**: Barometric altitude PID adds a symmetric ±300 µs base shift post throttle mapping
-- **Safety Systems**: Arming sequence and emergency stop
-- **Dynamic Scaling Details**:
-  - Raw mixes: M1 = -kR R - kP P + kY Y, M2 = -kR R + kP P - kY Y, M3 = +kR R - kP P - kY Y, M4 = +kR R + kP P + kY Y
-  - Compute posMax / negMin among mixes
-  - s_pos = min(1, (PWM_max - T) / posMax) ; s_neg = min(1, (T - PWM_min) / -negMin)
-  - Final motor = T + scaled mix (positive uses s_pos, negative uses s_neg)
-  - Ensures full available thrust while proportionally shrinking only the saturated side
+- Manual Mode: Direct joystick → mixer (dynamic scaling)
+- Stabilized Mode: PID outputs share identical mixer for consistent feel
+- Altitude Hold (prototype): Barometric ±300 µs additive throttle offset
+- Dynamic Scaling (X config):
+  - Raw mixes: M1 = -kR R - kP P + kY Y; M2 = -kR R + kP P - kY Y; M3 = +kR R - kP P - kY Y; M4 = +kR R + kP P + kY Y
+  - posMax / negMin → s_pos = min(1, (PWM_max - T)/posMax), s_neg = min(1, (T - PWM_min)/-negMin)
+  - Side-specific scaling preserves lift & proportionality
 
-### Planned Features (PID Integration)
+### Current PID & Stabilization Features (Dev)
 
-- **Stabilized Mode**: Automatic leveling with manual control
-- **Altitude Hold**: Barometric altitude maintenance
-- **Position Hold**: GPS-based position stabilization
-- **Auto-Level**: Automatic return to level flight
+- Complementary attitude fusion (Kalman optional)
+- Roll/Pitch/Yaw PID with throttle-gated integral & leak
+- Yaw feed-forward for improved yaw authority
+- Optional cascaded Angle→Rate inner loop (experimental)
+- Altitude hold (barometric additive correction – prototype)
+
+### Planned Enhancements
+
+- Telemetry versioning (promote high-precision GPS to stable)
+- Yaw drift mitigation (magnetometer / adaptive bias)
+- Position / altitude hybrid hold (baro + GPS fusion)
+- High-rate lightweight debug streaming channel
 
 ## 🛠️ Installation
 
-### Prerequisites
+1. Install PlatformIO (preferred) or Arduino IDE
+2. Clone repo & open root folder
+3. Select desired firmware (stable vs development) under `firmware/`
+4. Build & upload with PlatformIO tasks or CLI
+5. Verify radio & sensor output over serial before arming
 
-- **PlatformIO** or **Arduino IDE**
-- **ESP32 Board Package**
-- Required libraries (see `platformio.ini`)
+## 🚀 Usage
 
-### Hardware Setup
+1. Power system (ESCs calibrate automatically)
+2. Connect remote; confirm telemetry returns
+3. Arm via SW1 (throttle low + toggle)
+4. Fly in Manual or Stabilized; engage experimental altitude hold if enabled
 
-1. **Wire connections** according to pin configuration table
-2. **Power supply** with proper voltage regulation
-3. **Antenna mounting** for NRF24L01+ module
-4. **Propeller installation** with correct rotation direction
+Remote Controls:
 
-### Software Installation
+- Left Stick: Throttle (Y) / Yaw (X)
+- Right Stick: Pitch (Y) / Roll (X)
+- SW1: ARM / DISARM
+- SW2: Flight Mode (Manual / Stabilized)
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/esp32-flight-controller.git
+Safety:
 
-# Navigate to project directory
-cd esp32-flight-controller
-
-# For stable drone firmware (production use)
-cd firmware/stable/drone
-# Upload droneFreeRTOS.ino using PlatformIO or Arduino IDE
-
-# For stable remote controller firmware (production use)
-cd ../remote
-# Upload remoteControllerStable.ino using PlatformIO or Arduino IDE
-
-# For development versions (experimental features)
-cd ../../development/drone
-# Upload development firmware for PID integration work
-
-# Return to project root for PlatformIO builds
-cd ../../
-pio run --target upload
-```
-
-### Quick Start Guide
-
-1. **Hardware Assembly** - Follow pin configuration tables for wiring
-2. **Stable Firmware** - Use `firmware/stable/*` for production/flight operations
-3. **Development Firmware** - Use `firmware/development/*` for PID implementation and testing
-4. **Component Testing** - Use examples in `examples/` for individual component verification
-5. **System Integration** - Test complete system using tools in `tools/` directory
-6. **Documentation** - Refer to `docs/` for detailed progress and technical information## 🚀 Usage
-
-### Initial Setup
-
-1. **Power on** the system - ESCs will auto-calibrate
-2. **Connect remote** - Verify RF communication link
-3. **Arm system** - Use toggle switch SW1
-4. **Test controls** - Verify joystick response
-
-### Remote Control Operation
-
-- **Left Joystick**: Throttle (Y-axis) and Yaw (X-axis)
-- **Right Joystick**: Pitch (Y-axis) and Roll (X-axis)
-- **SW1 Toggle**: ARM/DISARM system
-- **SW2 Toggle**: Emergency stop (immediate motor shutdown)
-
-### Safety Procedures
-
-- **Always arm on level surface** with clear propeller area
-- **Keep emergency stop accessible** during operation
-- **Monitor battery voltage** to prevent over-discharge
-- **Respect control timeout** - system disarms after 1 second of lost communication
+- Always arm on a level, clear surface
+- Observe control timeout; system disarms on link loss
+- Monitor battery to avoid over-discharge
 
 ## 📊 Development Status
 
 ### ✅ Completed Features
 
-- RF remote control system with joystick integration
-- FreeRTOS multi-threading architecture
-- Comprehensive sensor integration
-- ESC control with auto-calibration
-- Safety systems and status indicators
-- Real-time telemetry transmission
+- Low-latency RF control path & mixer parity
+- Unified dynamic scaling motor mixer
+- Sensor integration (IMU, baro, GPS, env, light, ToF, battery)
+- ESC calibration & safety systems
+- High-precision GPS telemetry (dev builds)
+- Advanced PID feature set (dev)
 
 ### 🔄 In Progress
 
-- PID stabilization controller implementation
-- MPU6050 sensor fusion algorithms
-- Advanced flight modes
+- Telemetry versioning & GPS precision promotion
+- Yaw drift handling & heading stabilization
+- Position / altitude hold research
 
 ### 📋 Planned Features
 
-- Autonomous flight capabilities
-- GPS waypoint navigation
-- Advanced telemetry dashboard
-- Mobile app integration
+- GPS waypoint navigation (after position hold)
+- Enhanced telemetry dashboard & streaming
+- Autonomous flight capabilities (long-term)
+- Mobile / companion app integration
 
-For detailed progress tracking, see [docs/PROJECT_PROGRESS.md](docs/PROJECT_PROGRESS.md).
+For detailed progress tracking see `docs/PROJECT_PROGRESS.md`.
 
 ## 🗂️ Directory Navigation
 
-- **🚁 [firmware/](firmware/)** - Stable and development firmware versions
-  - **✅ [stable_drone/](firmware/stable_drone/)** - Production-ready drone firmware
-  - **✅ [stable_remote/](firmware/stable_remote/)** - Production-ready remote firmware
-  - **🔬 [development_drone/](firmware/development_drone/)** - PID integration development
-  - **🔬 [development_remote/](firmware/development_remote/)** - Enhanced features development
-- **📚 [docs/](docs/)** - Complete project documentation and progress tracking
-- **🔬 [examples/](examples/)** - Sensor tests and component verification programs
-- **🛠️ [tools/](tools/)** - Development utilities and web dashboard
-- **🔌 [hardware/](hardware/)** - Hardware specifications and diagrams (planned)
-- **📦 [archive/](archive/)** - Legacy versions and deprecated implementations## 🤝 Contributing
+- **🚁 firmware/** – Stable & development firmware
+  - ✅ stable/drone/ – Production-ready drone firmware
+  - ✅ stable/remote/ – Production-ready remote firmware
+  - 🔬 development/drone/ – Active dev (precision GPS, PID)
+  - 🔬 development/remote/ – Experimental features
+- **📚 docs/** – Technical documentation & status snapshots
+- **🔬 examples/** – Sensor & component test programs
+- **🛠️ tools/** – Utilities (e.g., web dashboard)
+- **📦 archive/** – Legacy & deprecated implementations
 
-Contributions are welcome! Please read our contributing guidelines and submit pull requests for any improvements.
+## 🤝 Contributing
 
-### Development Guidelines
+Contributions welcome. Please:
 
-- Follow Arduino/ESP32 coding standards
-- Test thoroughly before submitting
-- Update documentation for new features
-- Maintain backward compatibility when possible
+- Follow Arduino / ESP32 style conventions
+- Test thoroughly
+- Update documentation for user-facing changes
+- Maintain backward compatibility where feasible
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License – see `LICENSE`.
 
 ## 🙏 Acknowledgments
 
-- ESP32 community for excellent documentation
-- Arduino ecosystem for comprehensive libraries
-- FreeRTOS for real-time operating system capabilities
-- Open-source drone community for inspiration and guidance
+- ESP32 & Arduino communities
+- FreeRTOS ecosystem
+- Open-source drone development community
 
 ---
 
-**⚠️ Safety Notice**: This is experimental flight controller software. Always follow proper safety procedures when testing with live motors and propellers. Test in controlled environments and never operate near people or property.
-
-```
-
-```
+**⚠️ Safety Notice**: Experimental flight controller software. Test in controlled environments. Keep clear of props. Proceed responsibly.

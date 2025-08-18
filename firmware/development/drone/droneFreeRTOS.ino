@@ -627,9 +627,9 @@ volatile float pidAltitudeOutput = 0.0;
 // Adjust to tune authority of each axis.
 // k_r: roll, k_p: pitch, k_y: yaw
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
-float MIX_KR = 200.0f; // Roll gain (μs per full command)
-float MIX_KP = 200.0f; // Pitch gain (μs per full command)
-float MIX_KY = 150.0f; // Yaw gain (μs per full command)
+float MIX_KR = 100.0f; // Roll gain (μs per full command)
+float MIX_KP = 100.0f; // Pitch gain (μs per full command)
+float MIX_KY = 75.0f;  // Yaw gain (μs per full command)
 
 // PWM bounds (fallback to existing defines if present)
 #ifndef PWM_MIN_PULSE
@@ -881,10 +881,15 @@ void setup()
                 sensors_event_t accel, gyro, temp;
                 if (mpu6050.getEvent(&accel, &gyro, &temp))
                 {
-                    float roll_acc = atan2(accel.acceleration.y, accel.acceleration.z) * 180.0f / PI;
-                    float pitch_acc = atan2(-accel.acceleration.x, sqrt(accel.acceleration.y * accel.acceleration.y + accel.acceleration.z * accel.acceleration.z)) * 180.0f / PI;
-                    gx += gyro.gyro.x * 180.0f / PI;
-                    gy += gyro.gyro.y * 180.0f / PI;
+                    // 90° CW rotation about Z: bodyX=sensorY, bodyY=-sensorX
+                    float bodyAccelX = accel.acceleration.y;
+                    float bodyAccelY = -accel.acceleration.x;
+                    float bodyAccelZ = accel.acceleration.z;
+                    float roll_acc = atan2(bodyAccelY, bodyAccelZ) * 180.0f / PI;
+                    float pitch_acc = atan2(-bodyAccelX, sqrt(bodyAccelY * bodyAccelY + bodyAccelZ * bodyAccelZ)) * 180.0f / PI;
+                    // Gyro mapping: rollRate=gyroY, pitchRate=-gyroX
+                    gx += gyro.gyro.y * 180.0f / PI;
+                    gy += (-gyro.gyro.x) * 180.0f / PI;
                     gz += gyro.gyro.z * 180.0f / PI;
                     rSum += roll_acc;
                     pSum += pitch_acc;
@@ -2535,25 +2540,35 @@ void imuTask(void *parameter)
             if (readSuccess && xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
                 // Raw sensor data
-                imuData.accelX = accel.acceleration.x;
-                imuData.accelY = accel.acceleration.y;
-                imuData.accelZ = accel.acceleration.z;
-                imuData.gyroX = gyro.gyro.x * 180.0 / PI; // Convert to deg/s
-                imuData.gyroY = gyro.gyro.y * 180.0 / PI;
-                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;
+                // Apply 90° CW Z rotation mapping to body frame
+                imuData.accelX = accel.acceleration.y;     // bodyX
+                imuData.accelY = -accel.acceleration.x;    // bodyY
+                imuData.accelZ = accel.acceleration.z;     // bodyZ
+                imuData.gyroX = gyro.gyro.y * 180.0 / PI;  // roll rate
+                imuData.gyroY = -gyro.gyro.x * 180.0 / PI; // pitch rate
+                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;  // yaw rate
                 imuData.temperature = temp.temperature;
 
                 // Calculate roll and pitch from accelerometer
                 // Adjusted roll_acc sign (removed previous implicit convention) to align with control stick direction
                 float roll_acc = atan2(imuData.accelY, imuData.accelZ) * 180.0 / PI;
                 float pitch_acc = atan2(-imuData.accelX, sqrt(imuData.accelY * imuData.accelY + imuData.accelZ * imuData.accelZ)) * 180.0 / PI;
-                // Apply calibration offsets (calibration performed at startup)
-                // Apply calibration offsets
-                float gyroXCal = imuData.gyroX - imuCalibration.gyroXOffset;
-                float gyroYCal = imuData.gyroY - imuCalibration.gyroYOffset;
+                // Transform and subtract gyro calibration biases (original offsets in sensor frame)
+                // (Accelerometer bias terms not stored in this build; only roll/pitch angle offsets handled.)
+                // Gyro mapping: body roll rate = sensorY, body pitch rate = -sensorX
+                // Calibration stored: gyroXOffset = avg(gyro.gyro.y) => roll bias (body roll rate)
+                //                       gyroYOffset = avg(-gyro.gyro.x) => pitch bias (body pitch rate)
+                float gyroRollOffset = imuCalibration.gyroXOffset;  // roll bias in transformed frame
+                float gyroPitchOffset = imuCalibration.gyroYOffset; // pitch bias in transformed frame
+                float gyroXCal = imuData.gyroX - gyroRollOffset;
+                float gyroYCal = imuData.gyroY - gyroPitchOffset;
                 float gyroZCal = imuData.gyroZ - imuCalibration.gyroZOffset;
+                // Apply static level offsets so that calibrated orientation reads 0/0
                 float rollAccCal = roll_acc - imuCalibration.rollOffset;
                 float pitchAccCal = pitch_acc - imuCalibration.pitchOffset;
+                // Overwrite raw for subsequent fusion so downstream uses corrected values
+                roll_acc = rollAccCal;
+                pitch_acc = pitchAccCal;
 
                 // Enhanced yaw drift correction
                 // Check if drone is stationary (low angular rates on all axes)

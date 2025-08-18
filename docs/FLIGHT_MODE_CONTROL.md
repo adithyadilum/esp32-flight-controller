@@ -1,13 +1,19 @@
 # 🚁 Flight Mode Control System
 
-**Last Updated:** August 7, 2025  
-**System Status:** ✅ FULLY OPERATIONAL
+**Last Updated:** August 18, 2025  
+**System Status:** ✅ FULLY OPERATIONAL (with enhanced PID gating & mixer parity)
 
 ---
 
 ## Overview
 
 The ESP32 Flight Controller features a dual flight mode system that allows pilots to switch between manual control and stabilized flight assistance in real-time. This system provides flexibility for both experienced pilots who want direct control and those who prefer assisted flight.
+
+### Aug 18 Addendum
+
+- Integral portion of attitude PIDs now automatically gates below a throttle threshold to avoid integrator windup while allowing immediate P/D authority at takeoff.
+- Unified scaled mixer logic is identical across RF and WiFi builds → consistent behavior when switching platforms.
+- Yaw feed-forward introduced (small proportional assist) improving yaw responsiveness without destabilizing derivative behavior.
 
 ## Flight Mode Controls
 

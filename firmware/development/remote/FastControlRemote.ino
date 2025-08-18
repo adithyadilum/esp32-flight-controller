@@ -16,7 +16,7 @@
 #define WIFI_PASSWORD "0N7NT00ANTQ"
 
 // Upload frequency configuration (in milliseconds)
-#define FIREBASE_UPLOAD_INTERVAL 1000 // 10 seconds (change this value for testing)
+#define FIREBASE_UPLOAD_INTERVAL 1000 // 1 second (change this value for testing)
 // Common testing intervals:
 // 2000   = 2 seconds (fast testing)
 // 5000   = 5 seconds (medium testing)

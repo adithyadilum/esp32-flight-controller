@@ -38,7 +38,7 @@
 #define WIFI_PASSWORD "0N7NT00ANTQ"
 
 // Upload frequency configuration (in milliseconds)
-#define FIREBASE_UPLOAD_INTERVAL 5000 // 5 seconds (conservative for stability)
+#define FIREBASE_UPLOAD_INTERVAL 1000 // 1 second (conservative for stability)
 #define FIREBASE_ENABLED true         // Enabled with simple approach
 
 // OLED Display Configuration - Set to false to completely disable OLED functionality
@@ -93,7 +93,7 @@ struct ControlPacket
     uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Enhanced telemetry packet (22 bytes) - matches drone with lux, altitude, UV index, eCO2, and TVOC
+// Enhanced telemetry packet (30 bytes) - matches drone with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
     int16_t temperature;  // x100 - Real BME280 data
