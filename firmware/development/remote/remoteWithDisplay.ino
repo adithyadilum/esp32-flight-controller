@@ -128,6 +128,8 @@ const int16_t THROTTLE_RATE = 120;     // Throttle change rate per update (reach
 const int16_t THROTTLE_MIN = 0;        // Minimum throttle value (0% power)
 const int16_t THROTTLE_MAX = 3000;     // Maximum throttle value (100% power)
 const int16_t CONTROL_DEADZONE = 150;  // Deadzone for roll/pitch/yaw controls
+// Custom yaw deadzone (requested): applies only to yaw, wider than generic control deadzone
+const int16_t YAW_DEADZONE = 250; // Deadzone for yaw (±250)
 
 // Safety and control mode variables
 bool isArmed = false;          // Arm/disarm state (Toggle 1)
@@ -491,8 +493,10 @@ void updateOLEDDisplay()
         int joy2_y_disp = analogRead(JOY2_Y_PIN);
         int16_t yawDisp = map(joy1_x_disp, 0, 4095, -3000, 3000);
         int16_t rollDisp = map(joy2_x_disp, 0, 4095, -3000, 3000);
-        int16_t pitchDisp = map(joy2_y_disp, 0, 4095, -3000, 3000);
-        yawDisp = (abs(yawDisp) < CONTROL_DEADZONE) ? 0 : yawDisp;
+        // Inverted pitch display mapping (user request)
+        int16_t pitchDisp = map(joy2_y_disp, 0, 4095, 3000, -3000);
+        // Apply display deadzones (yaw uses its wider dedicated deadzone)
+        yawDisp = (abs(yawDisp) < YAW_DEADZONE) ? 0 : yawDisp;
         rollDisp = (abs(rollDisp) < CONTROL_DEADZONE) ? 0 : rollDisp;
         pitchDisp = (abs(pitchDisp) < CONTROL_DEADZONE) ? 0 : pitchDisp;
 
@@ -516,7 +520,7 @@ void updateOLEDDisplay()
             const int scale = 1;
             const int cW = charWidth(scale);
             const char *leftText = isArmed ? "Armed" : "Disarmed";
-            const char *rightText = isStabilizedMode ? "Automatic" : "Manual";
+            const char *rightText = isStabilizedMode ? "STABILIZED" : "Manual";
 
             int leftW = strLen(leftText) * cW;
             int basePipeLeftX = xCenter - (cW / 2);
@@ -1059,10 +1063,11 @@ void readJoystickInputs()
         // Map other controls with deadzone filtering
         int16_t yawInput = map(joy1_x, 0, 4095, -3000, 3000);
         int16_t rollInput = map(joy2_x, 0, 4095, -3000, 3000);
-        int16_t pitchInput = map(joy2_y, 0, 4095, -3000, 3000);
+        // Inverted pitch control mapping (user request)
+        int16_t pitchInput = map(joy2_y, 0, 4095, 3000, -3000);
 
-        // Apply deadzone filtering for other controls
-        controlData.yaw = (abs(yawInput) < CONTROL_DEADZONE) ? 0 : yawInput;
+        // Apply deadzone filtering (yaw uses its own wider deadzone)
+        controlData.yaw = (abs(yawInput) < YAW_DEADZONE) ? 0 : yawInput;
         controlData.roll = (abs(rollInput) < CONTROL_DEADZONE) ? 0 : rollInput;
         controlData.pitch = (abs(pitchInput) < CONTROL_DEADZONE) ? 0 : pitchInput;
     }
@@ -1187,7 +1192,7 @@ void printTelemetryData()
     // === FLIGHT MODE STATUS ===
     Serial.print(" | Mode: ");
     if (isStabilizedMode)
-        Serial.print(" STAB");
+        Serial.print(" STABILIZED");
     else
         Serial.print("🎯MAN");
 

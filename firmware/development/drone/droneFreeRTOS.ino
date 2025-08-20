@@ -20,7 +20,7 @@
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
  * - MotorTask: ESC control with PID integration (50Hz)
  * - IMUTask: High-frequency IMU reading and calibration (100Hz)
- * - PIDTask: PID control loop for stabilization (50Hz)
+ * - PIDTask: PID control loop for stabilization (200Hz)
  *
  * NOTE: PID control is active but PID values are not transmitted in telemetry
  * to keep telemetry focused on sensor data only.
@@ -50,6 +50,26 @@
 #define GPS_TX_PIN 17
 #define GUVA_PIN 36 // GUVA-S12SD UV sensor
 
+// Navigation / status light pins (adjust if wiring differs)
+#ifndef NAV_FRONT_LEFT_RED_PIN
+#define NAV_FRONT_LEFT_RED_PIN 2 // Front Left Red
+#endif
+#ifndef NAV_FRONT_RIGHT_GREEN_PIN
+#define NAV_FRONT_RIGHT_GREEN_PIN 32 // Front Right Green
+#endif
+#ifndef NAV_BACK_LEFT_RED_PIN
+#define NAV_BACK_LEFT_RED_PIN 25 // Back Left Red
+#endif
+#ifndef NAV_BACK_RIGHT_GREEN_PIN
+#define NAV_BACK_RIGHT_GREEN_PIN 33 // Back Right Green
+#endif
+#ifndef NAV_STATUS_FRONT_WHITE_PIN
+#define NAV_STATUS_FRONT_WHITE_PIN 17 // Front Center White (NOTE: conflicts with GPS TX if shared)
+#endif
+#ifndef NAV_STATUS_BACK_WHITE_PIN
+#define NAV_STATUS_BACK_WHITE_PIN 15 // Back Center White
+#endif
+
 // ESC Control Pins (PWM Outputs to Brushless Motors)
 #define ESC1_PIN 13 // Front Right (CCW)
 #define ESC2_PIN 12 // Back Right (CW)
@@ -69,7 +89,7 @@
 #define MPU6050_ADDRESS 0x68
 
 // PID Control Configuration
-#define PID_LOOP_FREQUENCY 50                       // Hz - 50Hz PID loop for smooth control
+#define PID_LOOP_FREQUENCY 200                      // Hz - increased from 50Hz for faster stabilization
 #define PID_LOOP_PERIOD (1000 / PID_LOOP_FREQUENCY) // ms
 
 // Extended PID behavior configuration
@@ -89,19 +109,19 @@ const float MANUAL_AXIS_GAIN = 1.30f;              // Gain applied to manual rol
 // PID TUNING PARAMETERS - Easy Adjustment Section
 // ================================
 // Roll PID Gains (Angle Stabilization)
-const double ROLL_KP = 2.5;  // Proportional gain - increase for faster response
-const double ROLL_KI = 0.1;  // Integral gain - increase to eliminate steady-state error
-const double ROLL_KD = 0.15; // Derivative gain - increase for more damping
+const double ROLL_KP = 0.5;  // Proportional gain - increase for faster response
+const double ROLL_KI = 0.0;  // Integral gain - increase to eliminate steady-state error
+const double ROLL_KD = 0.01; // Derivative gain - increase for more damping
 
 // Pitch PID Gains (Angle Stabilization)
-const double PITCH_KP = 2.5;  // Proportional gain - usually same as roll
-const double PITCH_KI = 0.1;  // Integral gain - usually same as roll
-const double PITCH_KD = 0.15; // Derivative gain - usually same as roll
+const double PITCH_KP = 0.5;  // Proportional gain - usually same as roll
+const double PITCH_KI = 0.0;  // Integral gain - usually same as roll
+const double PITCH_KD = 0.01; // Derivative gain - usually same as roll
 
 // Yaw PID Gains (Rate Control)
-const double YAW_KP = 1.0;  // Proportional gain - lower than roll/pitch
-const double YAW_KI = 0.05; // Integral gain - very small for yaw
-const double YAW_KD = 0.05; // Derivative gain - minimal for yaw
+const double YAW_KP = 0;   // Proportional gain - lower than roll/pitch
+const double YAW_KI = 0.0; // Integral gain - very small for yaw
+const double YAW_KD = 0.0; // Derivative gain - minimal for yaw
 
 // Optional cascaded control (Angle -> Rate) gains for roll/pitch inner rate loops
 const double ROLL_RATE_KP = 0.625;  // Inner rate PID Kp (deg/s -> μs)
@@ -112,9 +132,9 @@ const double PITCH_RATE_KI = ROLL_RATE_KI;
 const double PITCH_RATE_KD = ROLL_RATE_KD;
 
 // Altitude PID Gains (Position Control)
-const double ALT_KP = 1.5; // Proportional gain for altitude hold
-const double ALT_KI = 0.2; // Integral gain for altitude hold
-const double ALT_KD = 0.8; // Derivative gain for altitude hold
+const double ALT_KP = 0; // Proportional gain for altitude hold
+const double ALT_KI = 0; // Integral gain for altitude hold
+const double ALT_KD = 0; // Derivative gain for altitude hold
 
 // Advanced PID Parameters
 const double MAX_ANGLE = 30.0;     // Maximum roll/pitch angle (degrees)
@@ -122,8 +142,8 @@ const double MAX_YAW_RATE = 180.0; // Maximum yaw rate (degrees/second)
 const double MAX_CLIMB_RATE = 2.0; // Maximum climb rate (m/s)
 
 // Filter Coefficients (0.0 to 1.0, higher = more filtering)
-const double ROLL_FILTER = 0.1;  // Derivative filter for roll
-const double PITCH_FILTER = 0.1; // Derivative filter for pitch
+const double ROLL_FILTER = 0.3;  // Derivative filter for roll
+const double PITCH_FILTER = 0.3; // Derivative filter for pitch
 const double YAW_FILTER = 0.15;  // Derivative filter for yaw (more filtering)
 const double ALT_FILTER = 0.05;  // Derivative filter for altitude
 
@@ -142,8 +162,8 @@ const float KALMAN_RATE_STD = 4.0f; // deg/s process noise standard deviation
 const float KALMAN_MEAS_STD = 3.0f; // deg measurement noise standard deviation
 
 // Feature toggles (safe defaults: disabled)
-static bool USE_KALMAN_ATTITUDE = false;     // If true, use 1D Kalman for roll/pitch instead of complementary filter
-static bool USE_CASCADED_ANGLE_RATE = false; // If true, use angle outer loop -> rate inner loop for roll/pitch
+static bool USE_KALMAN_ATTITUDE = false;    // If true, use 1D Kalman for roll/pitch instead of complementary filter
+static bool USE_CASCADED_ANGLE_RATE = true; // If true, use angle outer loop -> rate inner loop for roll/pitch
 
 // Task stack sizes
 #define SENSOR_TASK_STACK 8192
@@ -569,6 +589,22 @@ PIDConfig pidConfig;
 IMUData imuData;
 FlightMode currentFlightMode = FLIGHT_MODE_DISARMED;
 
+// ==============================================
+// Static IMU calibration offsets (populate from external calibration sketch)
+// Roll/Pitch offsets are in degrees. Gyro offsets in deg/s.
+// Replace the 0.0f placeholders with measured values after running the standalone
+// calibration utility.
+
+const float IMU_ROLL_OFFSET_DEG = 0.246672f;   // averaged static roll offset (deg)
+const float IMU_PITCH_OFFSET_DEG = -0.217158f; // averaged static pitch offset (deg)
+const float IMU_ACCEL_X_OFFSET = 0.039720f;    // accel bias X (m/s^2)
+const float IMU_ACCEL_Y_OFFSET = 0.045119f;    // accel bias Y (m/s^2)
+const float IMU_ACCEL_Z_OFFSET = 0.669787f;    // accel bias Z after gravity removal (m/s^2)
+const float IMU_GYRO_X_OFFSET = 0.101496f;     // roll rate bias (deg/s)
+const float IMU_GYRO_Y_OFFSET = 0.010270f;     // pitch rate bias (deg/s)
+const float IMU_GYRO_Z_OFFSET = 0.046227f;     // yaw rate bias (deg/s)
+// ==============================================
+
 // Optional inner-loop Rate PID controllers (used when USE_CASCADED_ANGLE_RATE=true)
 PIDController rollRatePID, pitchRatePID;
 
@@ -581,18 +617,7 @@ struct Kalman1D
 Kalman1D kalmanRoll{0.0f, 4.0f};
 Kalman1D kalmanPitch{0.0f, 4.0f};
 
-// IMU Calibration Data
-struct IMUCalibration
-{
-    float rollOffset = 0.0;
-    float pitchOffset = 0.0;
-    float yawOffset = 0.0;
-    float gyroXOffset = 0.0;
-    float gyroYOffset = 0.0;
-    float gyroZOffset = 0.0;
-    bool calibrated = false;
-    int calibrationSamples = 0;
-} imuCalibration;
+// Removed IMUCalibration struct (using static constants instead of runtime calibration)
 
 // Yaw drift correction variables
 float gyroZBiasSum = 0.0;
@@ -823,6 +848,21 @@ void setup()
     analogSetAttenuation(ADC_11db);
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
 
+    // Configure navigation/status light pins
+    pinMode(NAV_FRONT_LEFT_RED_PIN, OUTPUT);
+    pinMode(NAV_FRONT_RIGHT_GREEN_PIN, OUTPUT);
+    pinMode(NAV_BACK_LEFT_RED_PIN, OUTPUT);
+    pinMode(NAV_BACK_RIGHT_GREEN_PIN, OUTPUT);
+    pinMode(NAV_STATUS_FRONT_WHITE_PIN, OUTPUT);
+    pinMode(NAV_STATUS_BACK_WHITE_PIN, OUTPUT);
+    // Default pattern (disarmed)
+    digitalWrite(NAV_FRONT_LEFT_RED_PIN, HIGH);
+    digitalWrite(NAV_FRONT_RIGHT_GREEN_PIN, HIGH);
+    digitalWrite(NAV_BACK_LEFT_RED_PIN, HIGH);
+    digitalWrite(NAV_BACK_RIGHT_GREEN_PIN, HIGH);
+    digitalWrite(NAV_STATUS_FRONT_WHITE_PIN, LOW);
+    digitalWrite(NAV_STATUS_BACK_WHITE_PIN, LOW);
+
     // Initialize GPS (Serial2 on ESP32)
     Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
@@ -860,81 +900,11 @@ void setup()
     // Initialize IMU and PID controllers (IMU calibration will run here for faster startup)
     initializeIMUAndPID();
 
-    // Perform IMU calibration at initialization (fast, before tasks start)
-    if (imuInitialized)
+    // Runtime IMU calibration removed. Using static constants (IMU_*_OFFSET). Ensure they are set from external calibration.
+    if (imuInitialized && xSemaphoreTake(serialMutex, pdMS_TO_TICKS(200)) == pdTRUE)
     {
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(200)) == pdTRUE)
-        {
-            Serial.println("Starting IMU calibration (startup)... Keep drone level and still.");
-            xSemaphoreGive(serialMutex);
-        }
-
-        // Collect a quicker set of samples at ~500 Hz for ~1s
-        const int CAL_SAMPLES = 500;
-        float gx = 0, gy = 0, gz = 0, rSum = 0, pSum = 0;
-        int samples = 0;
-        unsigned long start = millis();
-        while (samples < CAL_SAMPLES && millis() - start < 2000)
-        {
-            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(5)) == pdTRUE)
-            {
-                sensors_event_t accel, gyro, temp;
-                if (mpu6050.getEvent(&accel, &gyro, &temp))
-                {
-                    // 90° CW rotation about Z: bodyX=sensorY, bodyY=-sensorX
-                    float bodyAccelX = accel.acceleration.y;
-                    float bodyAccelY = -accel.acceleration.x;
-                    float bodyAccelZ = accel.acceleration.z;
-                    float roll_acc = atan2(bodyAccelY, bodyAccelZ) * 180.0f / PI;
-                    float pitch_acc = atan2(-bodyAccelX, sqrt(bodyAccelY * bodyAccelY + bodyAccelZ * bodyAccelZ)) * 180.0f / PI;
-                    // Gyro mapping: rollRate=gyroY, pitchRate=-gyroX
-                    gx += gyro.gyro.y * 180.0f / PI;
-                    gy += (-gyro.gyro.x) * 180.0f / PI;
-                    gz += gyro.gyro.z * 180.0f / PI;
-                    rSum += roll_acc;
-                    pSum += pitch_acc;
-                    samples++;
-                }
-                xSemaphoreGive(i2cMutex);
-            }
-            delay(2);
-        }
-
-        if (samples > 0)
-        {
-            imuCalibration.gyroXOffset = gx / samples;
-            imuCalibration.gyroYOffset = gy / samples;
-            imuCalibration.gyroZOffset = gz / samples;
-            imuCalibration.rollOffset = rSum / samples;
-            imuCalibration.pitchOffset = pSum / samples;
-            imuCalibration.calibrated = true;
-
-            // Seed attitude to level
-            if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(10)) == pdTRUE)
-            {
-                imuData.roll = 0.0f;
-                imuData.pitch = 0.0f;
-                imuData.yaw = 0.0f;
-                imuData.dataValid = true;
-                xSemaphoreGive(imuMutex);
-            }
-
-            if (USE_KALMAN_ATTITUDE)
-            {
-                kalmanRoll.angle = 0.0f;
-                kalmanRoll.uncertainty = 4.0f;
-                kalmanPitch.angle = 0.0f;
-                kalmanPitch.uncertainty = 4.0f;
-            }
-
-            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(200)) == pdTRUE)
-            {
-                Serial.printf("✓ IMU calibration done (startup). Gyro offsets: [%.2f, %.2f, %.2f], Level offsets: R=%.2f P=%.2f\n",
-                              imuCalibration.gyroXOffset, imuCalibration.gyroYOffset, imuCalibration.gyroZOffset,
-                              imuCalibration.rollOffset, imuCalibration.pitchOffset);
-                xSemaphoreGive(serialMutex);
-            }
-        }
+        Serial.println("IMU calibration skipped (using predefined constants).");
+        xSemaphoreGive(serialMutex);
     }
 
     // Initialize radio with PROVEN configuration
@@ -1131,8 +1101,47 @@ void statusTask(void *parameter)
             xSemaphoreGive(serialMutex);
         }
 
+        // Update navigation / status lights at faster cadence independent of print interval
+        updateNavigationLights(motorsArmed, stabilizedMode);
+
         // Wait for next cycle
         vTaskDelayUntil(&xLastWakeTime, statusFrequency);
+    }
+}
+
+// ================================
+// Navigation & Status Lights
+// ================================
+static void updateNavigationLights(bool armed, bool stabilized)
+{
+    // Navigation lights always on (solid)
+    digitalWrite(NAV_FRONT_LEFT_RED_PIN, HIGH);
+    digitalWrite(NAV_FRONT_RIGHT_GREEN_PIN, HIGH);
+    digitalWrite(NAV_BACK_LEFT_RED_PIN, HIGH);
+    digitalWrite(NAV_BACK_RIGHT_GREEN_PIN, HIGH);
+
+    unsigned long now = millis();
+
+    if (!armed)
+    {
+        // Disarmed: slow blink front white, rear off
+        bool blink = (now / 500) % 2; // 1Hz
+        digitalWrite(NAV_STATUS_BACK_WHITE_PIN, blink ? HIGH : LOW);
+        digitalWrite(NAV_STATUS_FRONT_WHITE_PIN, LOW);
+    }
+    else
+    {
+        // Armed: front solid, rear strobe (4Hz 25% duty). If stabilized mode, double flash pattern.
+        digitalWrite(NAV_STATUS_FRONT_WHITE_PIN, HIGH);
+        uint32_t phase = now % 250; // 4Hz base
+        bool rearOn = phase < 60;
+        if (stabilized)
+        {
+            // Add a quick second pulse at half period offset
+            uint32_t phase2 = (now + 125) % 250;
+            rearOn = rearOn || (phase2 < 40);
+        }
+        digitalWrite(NAV_STATUS_BACK_WHITE_PIN, rearOn ? HIGH : LOW);
     }
 }
 
@@ -1988,7 +1997,7 @@ void printStatus()
 
     // IMU Status
     Serial.print(", IMU: ");
-    if (imuInitialized && imuCalibration.calibrated)
+    if (imuInitialized)
     {
         if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
@@ -2001,12 +2010,6 @@ void printStatus()
             Serial.print("°]");
             xSemaphoreGive(imuMutex);
         }
-    }
-    else if (imuInitialized && !imuCalibration.calibrated)
-    {
-        Serial.print("CALIBRATING(");
-        Serial.print(imuCalibration.calibrationSamples);
-        Serial.print("/500)");
     }
     else
     {
@@ -2045,7 +2048,7 @@ void printStatus()
 void motorTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t motorFrequency = pdMS_TO_TICKS(20); // 50Hz motor update (20ms)
+    const TickType_t motorFrequency = pdMS_TO_TICKS(5); // 200Hz motor update (5ms)
 
     for (;;)
     {
@@ -2102,119 +2105,110 @@ void calculateMotorSpeeds()
 // Latency-optimized variant using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
-    // Check if motors should be armed (toggle switch 1 controls arming)
-    if (receivedControl.toggle1 == 1)
-    {
-        bool wasDisarmed = !motorsArmed;
-        motorsArmed = true;
+    // Minimal refactor: explicit edge tracking & PID mode change hygiene
+    static bool prevArmCmd = false;
+    static bool lastModeToggle = false; // cached toggle2 state while armed
+    bool armCmd = (receivedControl.toggle1 == 1);
+    bool modeToggle = (receivedControl.toggle2 == 1); // ON = Stabilized
 
-        // When first armed, check toggle2 for flight mode selection
-        if (wasDisarmed && currentFlightMode == FLIGHT_MODE_DISARMED)
+    // Rising edge: arming
+    if (armCmd && !prevArmCmd)
+    {
+        motorsArmed = true;
+        // Select initial mode based on toggle2
+        if (modeToggle)
         {
-            // Toggle 2 controls flight mode: ON = Stabilized, OFF = Manual
-            if (receivedControl.toggle2 == 1)
+            currentFlightMode = FLIGHT_MODE_STABILIZE;
+            pidEnabled = true;
+            stabilizedMode = true;
+            // Reset PID integrators to avoid stale windup on entry
+            rollPID.reset();
+            pitchPID.reset();
+            yawPID.reset();
+            altitudePID.reset();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                Serial.println("🔓 MOTORS ARMED - STABILIZED MODE (PID ON)");
+                xSemaphoreGive(serialMutex);
+            }
+        }
+        else
+        {
+            currentFlightMode = FLIGHT_MODE_MANUAL;
+            pidEnabled = false;
+            stabilizedMode = false;
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                Serial.println("🔓 MOTORS ARMED - MANUAL MODE (PID OFF)");
+                xSemaphoreGive(serialMutex);
+            }
+        }
+        lastModeToggle = modeToggle; // initialize cache to suppress duplicate print
+    }
+    // While armed: detect mode toggle edge
+    else if (armCmd && prevArmCmd)
+    {
+        if (modeToggle != lastModeToggle)
+        {
+            if (modeToggle)
             {
                 currentFlightMode = FLIGHT_MODE_STABILIZE;
-                pidEnabled = true;     // Enable PID for stabilized mode
-                stabilizedMode = true; // Update status variable
-
+                pidEnabled = true;
+                stabilizedMode = true;
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset(); // altitude PID only when that mode engaged
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
-                    Serial.println("🔓 MOTORS ARMED - STABILIZED MODE ACTIVE (PID ON)");
+                    Serial.println("🛡️ FLIGHT MODE: STABILIZED (PID ON)");
                     xSemaphoreGive(serialMutex);
                 }
             }
             else
             {
                 currentFlightMode = FLIGHT_MODE_MANUAL;
-                pidEnabled = false;     // Disable PID for manual mode
-                stabilizedMode = false; // Update status variable
-
+                pidEnabled = false;
+                stabilizedMode = false;
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
-                    Serial.println("🔓 MOTORS ARMED - MANUAL MODE ACTIVE (PID OFF)");
+                    Serial.println("🎯 FLIGHT MODE: MANUAL (PID OFF)");
                     xSemaphoreGive(serialMutex);
                 }
             }
-        }
-        else if (motorsArmed)
-        {
-            // Motors already armed - check for flight mode changes during flight
-            static bool lastModeToggle = false;
-            bool currentModeToggle = (receivedControl.toggle2 == 1);
-
-            if (currentModeToggle != lastModeToggle)
-            {
-                if (currentModeToggle)
-                {
-                    // Switch to Stabilized mode
-                    currentFlightMode = FLIGHT_MODE_STABILIZE;
-                    pidEnabled = true;
-                    stabilizedMode = true; // Update status variable
-
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                    {
-                        Serial.println("🛡️ FLIGHT MODE: STABILIZED (PID ON)");
-                        xSemaphoreGive(serialMutex);
-                    }
-                }
-                else
-                {
-                    // Switch to Manual mode
-                    currentFlightMode = FLIGHT_MODE_MANUAL;
-                    pidEnabled = false;
-                    stabilizedMode = false; // Update status variable
-
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                    {
-                        Serial.println("🎯 FLIGHT MODE: MANUAL (PID OFF)");
-                        xSemaphoreGive(serialMutex);
-                    }
-                }
-                lastModeToggle = currentModeToggle;
-            }
+            lastModeToggle = modeToggle;
         }
     }
-    else
+    // Falling edge: disarming
+    else if (!armCmd && prevArmCmd)
     {
-        // Motors being disarmed - trigger pressure re-calibration
-        static bool wasArmed = false;
-        if (wasArmed && motorsArmed) // Transition from armed to disarmed
+        // Re-calibrate altitude baseline if enough pressure samples collected
+        if (pressureCount >= PRESSURE_BUFFER_SIZE / 2)
         {
-            // Re-calibrate pressure reference and reset altitude offset
-            if (pressureCount >= PRESSURE_BUFFER_SIZE / 2) // Ensure we have enough samples
+            seaLevelPressure = exponentialPressure;
+            altitudeOffset = 44330.0 * (1.0 - pow(exponentialPressure / seaLevelPressure, 0.1903));
+            altitudeCalibrated = true;
+            lastAltitudeCalibration = millis();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
             {
-                seaLevelPressure = exponentialPressure;
-                altitudeOffset = 44330.0 * (1.0 - pow(exponentialPressure / seaLevelPressure, 0.1903));
-                altitudeCalibrated = true;
-                lastAltitudeCalibration = millis();
-
-                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
-                {
-                    Serial.printf("Altitude re-calibrated on disarm - Ref P: %.2f hPa, Offset: %.2f m\n",
-                                  seaLevelPressure, altitudeOffset);
-                    xSemaphoreGive(serialMutex);
-                }
+                Serial.printf("Altitude re-calibrated on disarm - Ref P: %.2f hPa, Offset: %.2f m\n", seaLevelPressure, altitudeOffset);
+                xSemaphoreGive(serialMutex);
             }
-
-            // Reset yaw angle to prevent accumulation
-            imuData.yaw = 0.0;
-            lastYawReset = millis();
         }
-        wasArmed = motorsArmed;
+        imuData.yaw = 0.0f; // reset yaw accumulation
+        lastYawReset = millis();
         motorsArmed = false;
-        stabilizedMode = false; // Reset flight mode status
+        stabilizedMode = false;
         currentFlightMode = FLIGHT_MODE_DISARMED;
         pidEnabled = false;
+        // Force motors to min below after armed check block
     }
+
+    prevArmCmd = armCmd;
 
     if (!motorsArmed)
     {
-        // Motors disarmed - all ESCs to minimum
         for (int i = 0; i < 4; i++)
-        {
             motorSpeeds[i] = ESC_ARM_PULSE;
-        }
         return;
     }
 
@@ -2539,14 +2533,20 @@ void imuTask(void *parameter)
 
             if (readSuccess && xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
-                // Raw sensor data
-                // Apply 90° CW Z rotation mapping to body frame
-                imuData.accelX = accel.acceleration.y;     // bodyX
-                imuData.accelY = -accel.acceleration.x;    // bodyY
-                imuData.accelZ = accel.acceleration.z;     // bodyZ
-                imuData.gyroX = gyro.gyro.y * 180.0 / PI;  // roll rate
-                imuData.gyroY = -gyro.gyro.x * 180.0 / PI; // pitch rate
-                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;  // yaw rate
+                // Raw sensor data with bias removal then frame rotation.
+                // Offsets from calibration sketch: accel biases already have gravity removed for Z (azOff-9.81) at storage time.
+                float sensorAx = accel.acceleration.x - IMU_ACCEL_X_OFFSET; // sensor frame X bias removed
+                float sensorAy = accel.acceleration.y - IMU_ACCEL_Y_OFFSET; // sensor frame Y bias removed
+                float sensorAz = accel.acceleration.z - IMU_ACCEL_Z_OFFSET; // sensor frame Z bias removed (still includes +gravity physically present)
+
+                // Rotate 90° CW about Z to body frame per existing convention
+                imuData.accelX = sensorAy;  // body X
+                imuData.accelY = -sensorAx; // body Y
+                imuData.accelZ = sensorAz;  // body Z (keep gravity for attitude math)
+
+                imuData.gyroX = gyro.gyro.y * 180.0 / PI;  // roll rate (deg/s)
+                imuData.gyroY = -gyro.gyro.x * 180.0 / PI; // pitch rate (deg/s)
+                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;  // yaw rate (deg/s)
                 imuData.temperature = temp.temperature;
 
                 // Calculate roll and pitch from accelerometer
@@ -2558,14 +2558,14 @@ void imuTask(void *parameter)
                 // Gyro mapping: body roll rate = sensorY, body pitch rate = -sensorX
                 // Calibration stored: gyroXOffset = avg(gyro.gyro.y) => roll bias (body roll rate)
                 //                       gyroYOffset = avg(-gyro.gyro.x) => pitch bias (body pitch rate)
-                float gyroRollOffset = imuCalibration.gyroXOffset;  // roll bias in transformed frame
-                float gyroPitchOffset = imuCalibration.gyroYOffset; // pitch bias in transformed frame
+                float gyroRollOffset = IMU_GYRO_X_OFFSET;  // roll bias in transformed frame
+                float gyroPitchOffset = IMU_GYRO_Y_OFFSET; // pitch bias in transformed frame
                 float gyroXCal = imuData.gyroX - gyroRollOffset;
                 float gyroYCal = imuData.gyroY - gyroPitchOffset;
-                float gyroZCal = imuData.gyroZ - imuCalibration.gyroZOffset;
+                float gyroZCal = imuData.gyroZ - IMU_GYRO_Z_OFFSET;
                 // Apply static level offsets so that calibrated orientation reads 0/0
-                float rollAccCal = roll_acc - imuCalibration.rollOffset;
-                float pitchAccCal = pitch_acc - imuCalibration.pitchOffset;
+                float rollAccCal = roll_acc - IMU_ROLL_OFFSET_DEG;
+                float pitchAccCal = pitch_acc - IMU_PITCH_OFFSET_DEG;
                 // Overwrite raw for subsequent fusion so downstream uses corrected values
                 roll_acc = rollAccCal;
                 pitch_acc = pitchAccCal;
@@ -2663,11 +2663,11 @@ void imuTask(void *parameter)
 void pidControlTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t pidFrequency = pdMS_TO_TICKS(PID_LOOP_PERIOD); // 50Hz PID loop
+    const TickType_t pidFrequency = pdMS_TO_TICKS(PID_LOOP_PERIOD); // 200Hz PID loop
 
     for (;;)
     {
-        if (imuCalibration.calibrated && imuData.dataValid && pidEnabled)
+        if (imuData.dataValid && pidEnabled) // Static IMU offsets assumed valid
         {
             // Take mutexes in consistent order to avoid deadlock
             if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE)
@@ -2987,7 +2987,7 @@ void updateFlightMode()
                 currentFlightMode = FLIGHT_MODE_STABILIZE;
                 pidEnabled = true;
 
-                // Reset PID controllers when enabling
+                // Reset PID integrators when enabling
                 rollPID.reset();
                 pitchPID.reset();
                 yawPID.reset();
@@ -3076,6 +3076,6 @@ float getFilteredAltitude()
     }
 
     float gpsAlt = gpsAltitudeMeters;
-    bool useGPS = (sats >= 4) && !isnan(gpsAlt) && fabs(gpsAlt) < 10000.0f;
+    bool useGPS = (sats >= 5) && !isnan(gpsAlt) && fabs(gpsAlt) < 10000.0f;
     return useGPS ? gpsAlt : baroAltM;
 }
