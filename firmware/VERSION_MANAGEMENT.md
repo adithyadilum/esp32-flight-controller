@@ -1,6 +1,6 @@
 # 📋 Firmware Version Management
 
-**Last Updated:** August 7, 2025 - Major firmware reorganization and stable promotion
+**Last Updated:** August 18, 2025 - Latency optimization, GPS precision (dev), IMU rotation & advanced PID
 
 ## 🚀 **VERSION 4.0 - MOTOR CONTROL SYSTEM COMPLETE** (August 7, 2025)
 
@@ -47,12 +47,18 @@
 
 - **Location:** `firmware/development/drone/droneFreeRTOS.ino`
 - **Status:** 🔬 **DEVELOPMENT VERSION - FEATURE ENHANCEMENT**
-- **Purpose:** Control mapping refinements and advanced features
+- **Purpose:** Rapid iteration on control quality, telemetry precision, and stabilization.
+- **Recent (Aug 18):**
+  - Radio polling tightened (~500Hz) & NRF24 1 Mbps data rate → reduced control latency
+  - IMU 90° Z-axis rotation compensation with proper calibration transform
+  - High-precision GPS telemetry (latitudeE7 / longitudeE7 int32 \*1e7) – dev only (stable unchanged)
+  - Advanced PID: integral gating, leak, yaw feed-forward, optional cascaded angle→rate
+  - Unified scaled mixer parity with WiFi controller build
 - **Next Features:**
-  - Control response curve optimization
-  - Advanced flight modes (GPS position hold)
-  - Real-time parameter tuning interface
-  - Enhanced telemetry and data logging
+  - Telemetry version byte for schema negotiation
+  - Yaw drift mitigation / magnetometer integration
+  - Lightweight high-frequency debug stream toggle
+  - Position hold prototype after yaw stabilization
 - **Base:** Working copy of stable v4.0 firmware
 - **⚠️ Use For:** Development and testing of new features only
 
@@ -60,12 +66,15 @@
 
 - **Location:** `firmware/development/remote/remoteControllerStable.ino`
 - **Status:** 🔬 **DEVELOPMENT VERSION - FEATURE ENHANCEMENT**
-- **Purpose:** Advanced control features and UI improvements
+- **Purpose:** Advanced control UI, diagnostics, and live tuning interface.
+- **Recent (Aug 18):**
+  - Updated to display / log high-precision GPS (latitudeE7 / longitudeE7) for dev packet
+  - Prepared for future packet version negotiation & tuner integration
 - **Next Features:**
-  - Real-time PID parameter adjustment interface
-  - Advanced control modes and flight assistance
-  - Enhanced telemetry display and data visualization
-  - Control mapping customization
+  - Real-time PID & mixer gain tuning synchronization
+  - Packet version negotiation UI for backward compatibility
+  - Enhanced latency & saturation diagnostics (expose s_pos / s_neg)
+  - Control mapping curve customization
 - **Base:** Working copy of stable v4.0 firmware
 - **⚠️ Use For:** Development and testing of new features only
 

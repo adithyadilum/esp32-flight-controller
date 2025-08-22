@@ -1,12 +1,66 @@
 # 🚁 ESP32 Weather Drone - Project Progress Documentation
 
 **Project Start Date:** August 1, 2025  
-**Last Updated:** August 7, 2025 - FLIGHT MODE SWITCHING SYSTEM IMPLEMENTED  
-**Current Phase:** 🎉 MOTOR CONTROL SYSTEM FULLY OPERATIONAL WITH FLIGHT MODE SWITCHING
+**Last Updated:** August 18, 2025 – LATENCY, HIGH-PRECISION GPS, IMU ROTATION, PID ENHANCEMENTS  
+**Current Phase:** 🧪 CONTROL QUALITY & STABILIZATION IMPROVEMENT (Development Branch)
 
 ---
 
-## 🚀 LATEST BREAKTHROUGH - FLIGHT MODE SWITCHING SYSTEM COMPLETE!
+## 🆕 AUG 18, 2025 – RECENT DEVELOPMENT UPDATES
+
+### ✅ Radio Control Latency Reduced
+
+- Radio task poll interval tightened to ~2ms (≈500Hz) enabling near-real-time reception.
+- NRF24 data rate raised to 1 Mbps; auto-retry counts trimmed → lower control-to-actuator lag.
+- Removed superfluous loop delays in RF code path.
+
+### ✅ High-Precision GPS Telemetry (Development Only)
+
+- Replaced int16 lat/lon (*100) with int32 latitudeE7 / longitudeE7 (*1e7) → ~1 cm resolution.
+- Firebase & serial output updated (development remote). Stable firmware intentionally unchanged for compatibility.
+
+### ✅ IMU 90° CW Rotation Compensation
+
+- Applied axis remap: bodyX=sensorY, bodyY=-sensorX, bodyZ=sensorZ; rollRate=gyroY, pitchRate=-gyroX, yawRate=gyroZ.
+- Transformed stored calibration (gyro & accel) into body frame before subtraction.
+- Fixed earlier drift caused by incorrect gyro bias association.
+
+### ✅ Attitude Fusion Integrity
+
+- Complementary filter (α=0.98) remains default; optional 1D Kalman preserved (disabled).
+- Ensured calibration edge reseeds angle state; eliminated double-offset subtraction.
+
+### ✅ PID Controller Enhancements
+
+- Integral gating by throttle (>35%) while keeping P/D active at low throttle.
+- Integral leak (iTermLeak) to decay bias when integral accumulation paused.
+- Yaw feed-forward term (0.10–0.15) improves yaw responsiveness without excess P.
+- Optional cascaded Angle→Rate architecture (roll/pitch) added; disabled by default.
+- Consistent output limits (±400 roll/pitch, ±200 yaw) across RF & WiFi builds.
+
+### ✅ Unified Scaled Motor Mixer Consistency
+
+- Same dynamic dual-sided scaling algorithm in both builds; verified matching outputs under identical gains.
+- Full throttle span preserved; mixer auto-scales differential axes only near saturation.
+
+### ✅ Logging & Perceived Lag Clarified
+
+- Slow angle updates in status task due to 0.1 Hz diagnostic print, not control loop latency (IMU 100Hz, PID 50Hz, radio poll 500Hz).
+
+### 🔍 Verified Data Path
+
+- Code search confirmed `imuData.roll/pitch` (post-rotation & bias correction) feed PID inputs directly; no legacy pre-rotation usage remains.
+
+### 📌 Pending / Optional Next Steps
+
+- Add telemetry schema version byte (dev vs stable discrimination).
+- Higher-rate (25–50Hz) lightweight debug streaming toggle.
+- Yaw absolute heading (magnetometer or enhanced gyro drift management).
+- Automated post-rotation calibration validation routine.
+
+---
+
+## 🚀 LATEST BREAKTHROUGH - FLIGHT MODE SWITCHING SYSTEM COMPLETE! (Historical: Aug 7, 2025)
 
 ### ✅ CRITICAL: Flight Mode Switching Implementation
 
