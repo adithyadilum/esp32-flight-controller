@@ -37,6 +37,9 @@ WebServer server(80);
 #define ESC2_PIN 12 // Back Right (CW)
 #define ESC3_PIN 14 // Front Left (CW)
 #define ESC4_PIN 27 // Back Left (CCW)
+#define LED_R1_PIN 25
+#define LED_G1_PIN 33
+#define LED_B1_PIN 32
 #define BUZZER_PIN 26
 #define SDA_PIN 21
 #define SCL_PIN 22
@@ -379,22 +382,22 @@ struct PIDParams
 
 // Initialize with enhanced values for better stabilization
 PIDParams pidParams = {
-    // Roll PID - start at zero for live tuning
-    .roll_kp = 0.0,
-    .roll_ki = 0.0,
-    .roll_kd = 0.0,
-    // Pitch PID
-    .pitch_kp = 0.0,
-    .pitch_ki = 0.0,
-    .pitch_kd = 0.0,
-    // Yaw PID
-    .yaw_kp = 0.0,
-    .yaw_ki = 0.0,
-    .yaw_kd = 0.0,
+    // Roll PID - Enhanced for stronger correction with anti-windup
+    .roll_kp = 0.5,   // Balanced response
+    .roll_ki = 0,     // Small integral for steady-state error
+    .roll_kd = 0.001, // Damping for smooth control
+    // Pitch PID - Enhanced for stronger correction with anti-windup
+    .pitch_kp = 0.5,   // Balanced response
+    .pitch_ki = 0,     // Small integral for steady-state error
+    .pitch_kd = 0.001, // Damping for smooth control
+    // Yaw PID - Enhanced for better authority with rate control
+    .yaw_kp = 0, // Lower gain for yaw
+    .yaw_ki = 0, // Very small integral for yaw
+    .yaw_kd = 0, // Minimal damping for yaw
     // Altitude PID
-    .altitude_kp = 0.0,
-    .altitude_ki = 0.0,
-    .altitude_kd = 0.0};
+    .altitude_kp = 0,
+    .altitude_ki = 0,
+    .altitude_kd = 0};
 
 // Control Inputs (from WiFi dashboard or NRF24L01)
 struct ControlInputs
@@ -447,17 +450,33 @@ struct SensorData
     bool valid;
 };
 
-// IMU calibration data (static constants populated from external calibration sketch)
-// Angle offsets are the mounting roll/pitch (deg). Accel offsets are sensor-frame biases (m/s^2) with gravity removed from Z.
-// Gyro offsets are raw sensor-frame biases in rad/s (Adafruit library returns rad/s).
-const float IMU_ROLL_OFFSET_DEG = 0.246672f;   // mounting roll (deg)
-const float IMU_PITCH_OFFSET_DEG = -0.217158f; // mounting pitch (deg)
-const float IMU_ACCEL_X_OFFSET = 0.039720f;    // sensor X accel bias (m/s^2)
-const float IMU_ACCEL_Y_OFFSET = 0.045119f;    // sensor Y accel bias (m/s^2)
-const float IMU_ACCEL_Z_OFFSET = 0.669787f;    // sensor Z accel bias (after gravity removal) (m/s^2)
-const float IMU_GYRO_X_OFFSET = 0.101496f;     // sensor X gyro bias (rad/s)
-const float IMU_GYRO_Y_OFFSET = 0.010270f;     // sensor Y gyro bias (rad/s)
-const float IMU_GYRO_Z_OFFSET = 0.046227f;     // sensor Z gyro bias (rad/s)
+// IMU Calibration Structure
+struct IMUCalibration
+{
+    float roll_offset;
+    float pitch_offset;
+    float yaw_offset;
+    float accel_x_offset;
+    float accel_y_offset;
+    float accel_z_offset;
+    float gyro_x_offset;
+    float gyro_y_offset;
+    float gyro_z_offset;
+    bool calibrated;
+};
+
+// IMU calibration data - will be set during startup calibration
+IMUCalibration imuCal = {
+    .roll_offset = 0.0,
+    .pitch_offset = 0.0,
+    .yaw_offset = 0.0,
+    .accel_x_offset = 0.0,
+    .accel_y_offset = 0.0,
+    .accel_z_offset = 0.0,
+    .gyro_x_offset = 0.0,
+    .gyro_y_offset = 0.0,
+    .gyro_z_offset = 0.0,
+    .calibrated = false};
 
 // Global State Variables
 FlightState flightState;
@@ -759,8 +778,10 @@ void setup()
     // Initialize hardware
     initializeHardware();
 
-    // Removed automatic IMU calibration call at startup and replaced with fixed constants
-    Serial.println("IMU calibration skipped (using predefined constants).");
+    // Calibrate IMU to set proper setpoints for level flight
+    Serial.println("Starting IMU calibration...");
+    calibrateIMU();
+    Serial.println("IMU calibration completed!");
 
     // Initialize flight state
     flightState.mode = MODE_DISARMED;
@@ -839,6 +860,9 @@ void loop()
 void initializeHardware()
 {
     // Initialize pins
+    pinMode(LED_R1_PIN, OUTPUT);
+    pinMode(LED_G1_PIN, OUTPUT);
+    pinMode(LED_B1_PIN, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(GUVA_PIN, INPUT);
     pinMode(BATTERY_PIN, INPUT);
@@ -1098,10 +1122,9 @@ void controlTask(void *parameter)
                 debugData.yaw_integral_saturated = yawPID.isIntegralSaturated();
 
                 // Calibration Debug Section
-                debugData.imu_cal_active = true; // always true now
-                debugData.roll_cal_offset = IMU_ROLL_OFFSET_DEG;
-                debugData.pitch_cal_offset = IMU_PITCH_OFFSET_DEG;
-                debugData.imu_calibrated = true;
+                debugData.imu_cal_active = imuCal.calibrated;
+                debugData.roll_cal_offset = imuCal.roll_offset;
+                debugData.pitch_cal_offset = imuCal.pitch_offset;
 
                 // Motor Mix Section
                 debugData.base_pwm = debugData.throttle_pwm;
@@ -1122,7 +1145,7 @@ void controlTask(void *parameter)
                 // System Section
                 debugData.sensors_ok = sensorData.valid;
                 debugData.emergency_active = flightState.emergency_stop;
-                debugData.imu_calibrated = true;
+                debugData.imu_calibrated = imuCal.calibrated;
                 debugData.uptime = millis();
                 debugData.free_heap = ESP.getFreeHeap();
                 debugData.timestamp = millis();
@@ -1347,6 +1370,7 @@ void calculateOrientation()
 {
     static float roll_angle = 0.0;
     static float pitch_angle = 0.0;
+    static bool prevCalibrated = false; // Track calibration edge
     static unsigned long lastUpdate = 0;
 
     unsigned long now = millis();
@@ -1377,19 +1401,22 @@ void calculateOrientation()
     // Apply IMU calibration offsets (note: sensor physically rotated 90° CW about Z)
     // Stored offsets are in raw sensor frame (sensorX, sensorY, sensorZ).
     // Mapping applied earlier: bodyX = sensorY, bodyY = -sensorX, bodyZ = sensorZ
-    // Accelerometer: transform offsets into body frame before subtraction
-    float body_accel_x_offset = IMU_ACCEL_Y_OFFSET;  // bodyX uses sensorY
-    float body_accel_y_offset = -IMU_ACCEL_X_OFFSET; // bodyY uses -sensorX
-    float body_accel_z_offset = IMU_ACCEL_Z_OFFSET;  // unchanged
-    accel_x -= body_accel_x_offset;
-    accel_y -= body_accel_y_offset;
-    accel_z -= body_accel_z_offset;
+    if (imuCal.calibrated)
+    {
+        // Accelerometer: transform offsets into body frame before subtraction
+        float body_accel_x_offset = imuCal.accel_y_offset;  // bodyX uses sensorY
+        float body_accel_y_offset = -imuCal.accel_x_offset; // bodyY uses -sensorX
+        float body_accel_z_offset = imuCal.accel_z_offset;  // unchanged
+        accel_x -= body_accel_x_offset;
+        accel_y -= body_accel_y_offset;
+        accel_z -= body_accel_z_offset;
 
-    // Gyroscope: body roll rate from sensorY, body pitch rate from -sensorX
-    float body_gyro_roll_offset_deg = IMU_GYRO_Y_OFFSET * 180.0 / PI;   // sensorY -> roll
-    float body_gyro_pitch_offset_deg = -IMU_GYRO_X_OFFSET * 180.0 / PI; // -sensorX -> pitch
-    gyro_roll -= body_gyro_roll_offset_deg;
-    gyro_pitch -= body_gyro_pitch_offset_deg;
+        // Gyroscope: body roll rate from sensorY, body pitch rate from -sensorX
+        float body_gyro_roll_offset_deg = imuCal.gyro_y_offset * 180.0 / PI;   // sensorY -> roll
+        float body_gyro_pitch_offset_deg = -imuCal.gyro_x_offset * 180.0 / PI; // -sensorX -> pitch
+        gyro_roll -= body_gyro_roll_offset_deg;
+        gyro_pitch -= body_gyro_pitch_offset_deg;
+    }
 
     // Calculate angles from accelerometer
     // Fix roll axis to match physical tilt direction
@@ -1399,9 +1426,6 @@ void calculateOrientation()
     // Use transformed accel_x/accel_y that already represent body axes.
     float accel_roll = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;   // roll from bodyY
     float accel_pitch = atan2(-accel_x, sqrt(accel_y * accel_y + accel_z * accel_z)) * 180.0 / PI; // pitch from bodyX
-    // Subtract mounting angle offsets so a physically level frame reads near 0/0
-    accel_roll -= IMU_ROLL_OFFSET_DEG;
-    accel_pitch -= IMU_PITCH_OFFSET_DEG;
 
     // Apply calibration offsets to get relative angles from level position
     // Do not subtract additional angle offsets here; accelerometer biases are already
@@ -1409,32 +1433,52 @@ void calculateOrientation()
     // introduce a residual bias when level. The complementary filter is seeded after
     // calibration to ensure the fused attitude starts at level.
 
-    // Initialize on first use or on calibration edge
-    if (!kalmanRoll.initialized)
+    // If calibration was just completed, re-seed the complementary filter state
+    // to the level-corrected accelerometer estimate to avoid residual bias.
+    if (imuCal.calibrated && !prevCalibrated)
     {
-        kalmanRoll.x = accel_roll;
-        kalmanRoll.p = 4.0f;
-        kalmanRoll.initialized = true;
-        kalmanPitch.x = accel_pitch;
-        kalmanPitch.p = 4.0f;
-        kalmanPitch.initialized = true;
+        roll_angle = accel_roll;
+        pitch_angle = accel_pitch;
     }
-    // Prediction
-    float q = (KALMAN_RATE_STD * KALMAN_RATE_STD) * dt; // process noise variance contribution
-    kalmanRoll.x += gyro_roll * dt;
-    kalmanRoll.p += q;
-    kalmanPitch.x += gyro_pitch * dt;
-    kalmanPitch.p += q;
-    // Measurement update
-    float r = (KALMAN_MEAS_STD * KALMAN_MEAS_STD);
-    float k_r = kalmanRoll.p / (kalmanRoll.p + r);
-    float k_p = kalmanPitch.p / (kalmanPitch.p + r);
-    kalmanRoll.x += k_r * (accel_roll - kalmanRoll.x);
-    kalmanRoll.p *= (1.0f - k_r);
-    kalmanPitch.x += k_p * (accel_pitch - kalmanPitch.x);
-    kalmanPitch.p *= (1.0f - k_p);
-    roll_angle = kalmanRoll.x;
-    pitch_angle = kalmanPitch.x;
+    prevCalibrated = imuCal.calibrated;
+
+    // Fusion: complementary filter or 1D Kalman (optional)
+    if (USE_KALMAN_ATTITUDE)
+    {
+        // Initialize on first use or on calibration edge
+        if (!kalmanRoll.initialized || (imuCal.calibrated && !prevCalibrated))
+        {
+            kalmanRoll.x = accel_roll;
+            kalmanRoll.p = 4.0f;
+            kalmanRoll.initialized = true;
+            kalmanPitch.x = accel_pitch;
+            kalmanPitch.p = 4.0f;
+            kalmanPitch.initialized = true;
+        }
+        // Prediction
+        float q = (KALMAN_RATE_STD * KALMAN_RATE_STD) * dt; // process noise variance contribution
+        kalmanRoll.x += gyro_roll * dt;
+        kalmanRoll.p += q;
+        kalmanPitch.x += gyro_pitch * dt;
+        kalmanPitch.p += q;
+        // Measurement update
+        float r = (KALMAN_MEAS_STD * KALMAN_MEAS_STD);
+        float k_r = kalmanRoll.p / (kalmanRoll.p + r);
+        float k_p = kalmanPitch.p / (kalmanPitch.p + r);
+        kalmanRoll.x += k_r * (accel_roll - kalmanRoll.x);
+        kalmanRoll.p *= (1.0f - k_r);
+        kalmanPitch.x += k_p * (accel_pitch - kalmanPitch.x);
+        kalmanPitch.p *= (1.0f - k_p);
+        roll_angle = kalmanRoll.x;
+        pitch_angle = kalmanPitch.x;
+    }
+    else
+    {
+        // Complementary filter (combine gyro and accel)
+        const float alpha = 0.98; // Gyro weight (higher = trust gyro more)
+        roll_angle = alpha * (roll_angle + gyro_roll * dt) + (1.0f - alpha) * accel_roll;
+        pitch_angle = alpha * (pitch_angle + gyro_pitch * dt) + (1.0f - alpha) * accel_pitch;
+    }
 
     // Update global sensor data
     if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(1)) == pdTRUE)
@@ -1580,8 +1624,6 @@ void runPIDControllers()
             rollPID.input = rollAngle;
             pitchPID.input = pitchAngle;
             yawPID.input = yawRate;
-
-            // Outer angle compute to get desired rate commands
 
             // Outer angle compute to get desired rate commands
             double rollDesiredRate = constrainFloat((float)rollPID.compute(), -MAX_ROLL_PITCH_RATE, MAX_ROLL_PITCH_RATE);
@@ -1880,13 +1922,161 @@ float constrainFloat(float value, float min_val, float max_val)
 
 void calibrateIMU()
 {
-    // Stub: Calibration removed from runtime. Use separate calibration sketch to determine offsets
-    // and paste the values into the IMU_*_OFFSET constants above.
-    Serial.println("IMU calibration skipped (using predefined constants).");
-}
+    Serial.println("===== IMU CALIBRATION STARTING =====");
+    Serial.println("Place drone on FLAT GROUND and keep STATIONARY during calibration!");
+    Serial.println("This calibration compensates for IMU mounting misalignment.");
+    Serial.println("Calibration will take 15 seconds...");
 
-// Duplicate IMU offset constants removed here. Single authoritative definitions are near the top
-// of the file under the comment: "// IMU calibration data - will be set during startup calibration".
+    // Visual indication of calibration - blink all LEDs
+    for (int i = 0; i < 5; i++)
+    {
+        digitalWrite(LED_R1_PIN, HIGH);
+        digitalWrite(LED_G1_PIN, HIGH);
+        digitalWrite(LED_B1_PIN, HIGH);
+        digitalWrite(NAV_FRONT_RIGHT_GREEN, LOW);
+        digitalWrite(NAV_BACK_RIGHT_GREEN, LOW);
+        digitalWrite(NAV_BACK_LEFT_RED, LOW);
+        digitalWrite(NAV_FRONT_LEFT_RED, LOW);
+        delay(200);
+
+        digitalWrite(LED_R1_PIN, LOW);
+        digitalWrite(LED_G1_PIN, LOW);
+        digitalWrite(LED_B1_PIN, LOW);
+        digitalWrite(NAV_FRONT_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_LEFT_RED, HIGH);
+        digitalWrite(NAV_FRONT_LEFT_RED, HIGH);
+        delay(200);
+    }
+
+    // Calibration beep sequence
+    for (int i = 0; i < 3; i++)
+    {
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+        delay(100);
+    }
+
+    delay(2000); // Wait 2 seconds before starting calibration
+
+    // Reset calibration values
+    imuCal.roll_offset = 0.0;
+    imuCal.pitch_offset = 0.0;
+    imuCal.yaw_offset = 0.0;
+    imuCal.accel_x_offset = 0.0;
+    imuCal.accel_y_offset = 0.0;
+    imuCal.accel_z_offset = 0.0;
+    imuCal.gyro_x_offset = 0.0;
+    imuCal.gyro_y_offset = 0.0;
+    imuCal.gyro_z_offset = 0.0;
+
+    // Extended calibration for better accuracy with longer samples
+    const int numSamples = 3000; // 15 seconds at ~200Hz for higher precision
+    float accel_x_sum = 0, accel_y_sum = 0, accel_z_sum = 0;
+    float gyro_x_sum = 0, gyro_y_sum = 0, gyro_z_sum = 0;
+    int validSamples = 0;
+
+    Serial.println("Collecting extended calibration samples for precise mounting offset compensation...");
+
+    for (int i = 0; i < numSamples; i++)
+    {
+        sensors_event_t accel, gyro, temp;
+        if (mpu.getEvent(&accel, &gyro, &temp))
+        {
+            accel_x_sum += accel.acceleration.x;
+            accel_y_sum += accel.acceleration.y;
+            accel_z_sum += accel.acceleration.z;
+            gyro_x_sum += gyro.gyro.x;
+            gyro_y_sum += gyro.gyro.y;
+            gyro_z_sum += gyro.gyro.z;
+            validSamples++;
+        }
+
+        // Progress indication
+        if (i % 150 == 0)
+        {
+            Serial.printf("Calibration progress: %d%%\n", (i * 100) / numSamples);
+            // Brief beep for progress
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(30);
+            digitalWrite(BUZZER_PIN, LOW);
+        }
+
+        delay(5); // ~200Hz sampling rate
+    }
+
+    if (validSamples > 750) // Need at least 750 valid samples for precision
+    {
+        // Calculate sensor offsets
+        imuCal.accel_x_offset = accel_x_sum / validSamples;
+        imuCal.accel_y_offset = accel_y_sum / validSamples;
+        imuCal.accel_z_offset = (accel_z_sum / validSamples) - 9.81; // Remove gravity from Z-axis
+        imuCal.gyro_x_offset = gyro_x_sum / validSamples;
+        imuCal.gyro_y_offset = gyro_y_sum / validSamples;
+        imuCal.gyro_z_offset = gyro_z_sum / validSamples;
+
+        // Calculate the current "level" angles from flat ground position
+        // These represent the IMU mounting misalignment relative to the drone frame
+        float raw_roll = atan2(imuCal.accel_y_offset, sqrt(imuCal.accel_x_offset * imuCal.accel_x_offset + (imuCal.accel_z_offset + 9.81) * (imuCal.accel_z_offset + 9.81))) * 180.0 / PI;
+        float raw_pitch = atan2(-imuCal.accel_x_offset, sqrt(imuCal.accel_y_offset * imuCal.accel_y_offset + (imuCal.accel_z_offset + 9.81) * (imuCal.accel_z_offset + 9.81))) * 180.0 / PI;
+
+        // Store these as the offsets to subtract from future angle calculations
+        // This makes the current flat ground position read as 0°, 0°
+        imuCal.roll_offset = raw_roll;
+        imuCal.pitch_offset = raw_pitch;
+        imuCal.yaw_offset = 0.0; // Yaw reference is relative
+
+        imuCal.calibrated = true;
+
+        Serial.println("===== IMU CALIBRATION COMPLETED =====");
+        Serial.printf("Accelerometer offsets: X=%.4f, Y=%.4f, Z=%.4f m/s²\n",
+                      imuCal.accel_x_offset, imuCal.accel_y_offset, imuCal.accel_z_offset);
+        Serial.printf("Gyroscope offsets: X=%.4f, Y=%.4f, Z=%.4f rad/s\n",
+                      imuCal.gyro_x_offset, imuCal.gyro_y_offset, imuCal.gyro_z_offset);
+        Serial.printf("IMU mounting angle offsets: Roll=%.3f°, Pitch=%.3f°\n",
+                      imuCal.roll_offset, imuCal.pitch_offset);
+        Serial.println("Current flat ground position will now read as 0°, 0° (perfect level).");
+        Serial.println("PID setpoints for stabilize mode will be relative to this calibrated level position.");
+
+        // Success beep sequence
+        for (int i = 0; i < 3; i++)
+        {
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(200);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(100);
+        }
+
+        // Green LED on to indicate successful calibration
+        digitalWrite(LED_G1_PIN, HIGH);
+        delay(2000);
+        digitalWrite(LED_G1_PIN, LOW);
+    }
+    else
+    {
+        Serial.println("===== IMU CALIBRATION FAILED =====");
+        Serial.printf("Not enough valid samples: %d/%d\n", validSamples, numSamples);
+        Serial.println("Check IMU connection and try again.");
+        Serial.println("Ensure drone is completely stationary during calibration.");
+
+        // Error beep sequence
+        for (int i = 0; i < 5; i++)
+        {
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(100);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(100);
+        }
+
+        // Red LED on to indicate failed calibration
+        digitalWrite(LED_R1_PIN, HIGH);
+        delay(3000);
+        digitalWrite(LED_R1_PIN, LOW);
+    }
+
+    Serial.println("=====================================");
+}
 
 // ================================
 // WEB SERVER SETUP
@@ -1905,7 +2095,7 @@ void setupWebServer()
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
         .container { max-width: 1200px; margin: 0 auto; }
         .card { background: white; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .status { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -2020,27 +2210,27 @@ void setupWebServer()
             <div class="controls">
                 <div>
                     <h3>Roll PID</h3>
-                    <label>P: <input type="number" id="roll_p" value="0.0" step="0.1" onchange="updatePID()"></label><br>
+                    <label>P: <input type="number" id="roll_p" value="0.5" step="0.1" onchange="updatePID()"></label><br>
                     <label>I: <input type="number" id="roll_i" value="0.0" step="0.01" onchange="updatePID()"></label><br>
-                    <label>D: <input type="number" id="roll_d" value="0.0" step="0.01" onchange="updatePID()"></label><br>
+                    <label>D: <input type="number" id="roll_d" value="0.001" step="0.01" onchange="updatePID()"></label><br>
                 </div>
                 <div>
                     <h3>Pitch PID</h3>
-                    <label>P: <input type="number" id="pitch_p" value="0.0" step="0.1" onchange="updatePID()"></label><br>
+                    <label>P: <input type="number" id="pitch_p" value="0.5" step="0.1" onchange="updatePID()"></label><br>
                     <label>I: <input type="number" id="pitch_i" value="0.0" step="0.01" onchange="updatePID()"></label><br>
-                    <label>D: <input type="number" id="pitch_d" value="0.0" step="0.01" onchange="updatePID()"></label><br>
+                    <label>D: <input type="number" id="pitch_d" value="0.001" step="0.01" onchange="updatePID()"></label><br>
                 </div>
                 <div>
                     <h3>Yaw PID</h3>
                     <label>P: <input type="number" id="yaw_p" value="0.0" step="0.1" onchange="updatePID()"></label><br>
                     <label>I: <input type="number" id="yaw_i" value="0.0" step="0.01" onchange="updatePID()"></label><br>
-                    <label>D: <input type="number" id="yaw_d" value="0.00" step="0.01" onchange="updatePID()"></label><br>
+                    <label>D: <input type="number" id="yaw_d" value="0.0" step="0.01" onchange="updatePID()"></label><br>
                 </div>
                 <div>
                     <h3>Altitude PID</h3>
-                    <label>P: <input type="number" id="alt_p" value="0.00" step="0.05" onchange="updatePID()"></label><br>
-                    <label>I: <input type="number" id="alt_i" value="0.00" step="0.01" onchange="updatePID()"></label><br>
-                    <label>D: <input type="number" id="alt_d" value="0.00" step="0.05" onchange="updatePID()"></label><br>
+                    <label>P: <input type="number" id="alt_p" value="0" step="0.05" onchange="updatePID()"></label><br>
+                    <label>I: <input type="number" id="alt_i" value="0" step="0.01" onchange="updatePID()"></label><br>
+                    <label>D: <input type="number" id="alt_d" value="0" step="0.05" onchange="updatePID()"></label><br>
                 </div>
             </div>
                         <hr>
@@ -2072,14 +2262,15 @@ void setupWebServer()
                             <div>
                                 <label><input type="checkbox" id="use_cascaded"> Use Cascaded Angle→Rate</label><br>
                                 <label>Max Roll/Pitch Rate (deg/s): <input type="number" id="max_rp_rate" value="180" step="10" onchange="updatePID()"></label><br>
-                                <label>Rate Roll P: <input type="number" id="rate_roll_p" value="0.1" step="0.01" onchange="updatePID()"></label>
+                                <label>Rate Roll P: <input type="number" id="rate_roll_p" value="0.10" step="0.01" onchange="updatePID()"></label>
                                 <label>I: <input type="number" id="rate_roll_i" value="0.02" step="0.01" onchange="updatePID()"></label>
                                 <label>D: <input type="number" id="rate_roll_d" value="0.002" step="0.001" onchange="updatePID()"></label><br>
-                                <label>Rate Pitch P: <input type="number" id="rate_pitch_p" value="0.1" step="0.01" onchange="updatePID()"></label>
+                                <label>Rate Pitch P: <input type="number" id="rate_pitch_p" value="0.10" step="0.01" onchange="updatePID()"></label>
                                 <label>I: <input type="number" id="rate_pitch_i" value="0.02" step="0.01" onchange="updatePID()"></label>
                                 <label>D: <input type="number" id="rate_pitch_d" value="0.002" step="0.001" onchange="updatePID()"></label>
                             </div>
                         </div>
+        </div>
         
         <!-- Flight Controller Debug Console -->
         <div class="card">
@@ -2714,71 +2905,107 @@ void setupWebServer()
     Serial.println("Web server started - Flight Controller Dashboard ready");
 }
 
+// ================================
+// LED CONTROL FUNCTIONS
+// ================================
+
 void initializeLEDs()
 {
+    // Initialize navigation LED pins
     pinMode(NAV_FRONT_RIGHT_GREEN, OUTPUT);
     pinMode(NAV_BACK_RIGHT_GREEN, OUTPUT);
     pinMode(NAV_BACK_LEFT_RED, OUTPUT);
-    pinMode(NAV_FRONT_LEFT_RED, OUTPUT);
     pinMode(NAV_FRONT_CENTER_WHITE, OUTPUT);
+    pinMode(NAV_FRONT_LEFT_RED, OUTPUT);
     pinMode(NAV_BACK_CENTER_WHITE, OUTPUT);
-    digitalWrite(NAV_FRONT_RIGHT_GREEN, LOW);
-    digitalWrite(NAV_BACK_RIGHT_GREEN, LOW);
-    digitalWrite(NAV_BACK_LEFT_RED, LOW);
-    digitalWrite(NAV_FRONT_LEFT_RED, LOW);
+
+    // Turn on navigation lights immediately (always on when powered)
+    digitalWrite(NAV_FRONT_RIGHT_GREEN, HIGH);
+    digitalWrite(NAV_BACK_RIGHT_GREEN, HIGH);
+    digitalWrite(NAV_BACK_LEFT_RED, HIGH);
+    digitalWrite(NAV_FRONT_LEFT_RED, HIGH);
+
+    // Center white LEDs start off (controlled by status)
     digitalWrite(NAV_FRONT_CENTER_WHITE, LOW);
     digitalWrite(NAV_BACK_CENTER_WHITE, LOW);
-}
 
-static unsigned long lastNavBlink = 0;
-static bool navPhase = false;
+    Serial.println("Navigation LEDs initialized");
+}
 
 void updateNavigationLights()
 {
-    unsigned long now = millis();
-    // Blink at 2Hz when disarmed, solid when armed
-    bool armed = flightState.motors_armed;
-    if (!armed)
-    {
-        if (now - lastNavBlink >= 250)
-        { // 4Hz toggle -> 2Hz full cycle
-            navPhase = !navPhase;
-            lastNavBlink = now;
-        }
-    }
-    else
-    {
-        navPhase = true; // solid on while armed
-    }
-    // Red lights = left side orientation
-    digitalWrite(NAV_FRONT_LEFT_RED, navPhase ? HIGH : LOW);
-    digitalWrite(NAV_BACK_LEFT_RED, navPhase ? HIGH : LOW);
-    // Green lights = right side orientation
-    digitalWrite(NAV_FRONT_RIGHT_GREEN, navPhase ? HIGH : LOW);
-    digitalWrite(NAV_BACK_RIGHT_GREEN, navPhase ? HIGH : LOW);
-    // White strobes: front & back center strobe slower only when armed & stabilized
-    static unsigned long lastStrobe = 0;
-    static bool strobeOn = false;
-    if (armed)
-    {
-        if (now - lastStrobe >= 1000)
-        { // 1Hz strobe
-            strobeOn = !strobeOn;
-            lastStrobe = now;
-        }
-    }
-    else
-    {
-        strobeOn = false;
-    }
-    digitalWrite(NAV_FRONT_CENTER_WHITE, strobeOn ? HIGH : LOW);
-    digitalWrite(NAV_BACK_CENTER_WHITE, strobeOn ? HIGH : LOW);
-}
+    // Nav lights (Red/Green) are always ON during powered-on state
+    // This helps identify orientation at night (Red = left, Green = right)
+    static bool nav_lights_on = true;
 
-static unsigned long lastStatusBlink = 0;
-static bool statusPhase = false;
+    if (nav_lights_on)
+    {
+        digitalWrite(NAV_FRONT_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_LEFT_RED, HIGH);
+        digitalWrite(NAV_FRONT_LEFT_RED, HIGH);
+    }
+}
 
 void updateStatusLights()
 {
-    // No-op: RGB status LEDs not present
+    static unsigned long last_blink_time = 0;
+    static bool blink_state = false;
+    unsigned long now = millis();
+
+    // Center white LEDs behavior based on flight state
+    if (!flightState.motors_armed)
+    {
+        // Arming Blink: Slow blink when waiting to arm (1Hz)
+        if (now - last_blink_time > 500)
+        {
+            last_blink_time = now;
+            blink_state = !blink_state;
+            digitalWrite(NAV_FRONT_CENTER_WHITE, blink_state);
+            digitalWrite(NAV_BACK_CENTER_WHITE, blink_state);
+        }
+    }
+    else
+    {
+        // Flight Mode On: Solid light when armed
+        digitalWrite(NAV_FRONT_CENTER_WHITE, HIGH);
+        digitalWrite(NAV_BACK_CENTER_WHITE, HIGH);
+
+        // Optional: Throttle Sync Pulse - Flash intensity reflects throttle level
+        setThrottlePulse(controlInputs.throttle);
+    }
+}
+
+void setThrottlePulse(float throttle_percentage)
+{
+    // Optional throttle sync pulse feature
+    // Flash the center white LEDs with intensity reflecting throttle level
+    static unsigned long last_pulse_time = 0;
+    static bool pulse_state = false;
+    unsigned long now = millis();
+
+    // Only pulse if throttle is above minimum and motors are armed
+    if (flightState.motors_armed && throttle_percentage > 0.05)
+    {
+        // Pulse frequency increases with throttle (10Hz to 50Hz)
+        int pulse_interval = map(throttle_percentage * 100, 5, 100, 100, 20);
+
+        if (now - last_pulse_time > pulse_interval)
+        {
+            last_pulse_time = now;
+            pulse_state = !pulse_state;
+
+            // Brief flash to indicate throttle activity
+            if (pulse_state)
+            {
+                digitalWrite(NAV_FRONT_CENTER_WHITE, LOW);
+                digitalWrite(NAV_BACK_CENTER_WHITE, LOW);
+            }
+            else
+            {
+                digitalWrite(NAV_FRONT_CENTER_WHITE, HIGH);
+                digitalWrite(NAV_BACK_CENTER_WHITE, HIGH);
+            }
+        }
+    }
 }

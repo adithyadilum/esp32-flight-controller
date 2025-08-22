@@ -495,8 +495,7 @@ void updateOLEDDisplay()
         int16_t rollDisp = map(joy2_x_disp, 0, 4095, -3000, 3000);
         // Inverted pitch display mapping (user request)
         int16_t pitchDisp = map(joy2_y_disp, 0, 4095, 3000, -3000);
-        // Apply display deadzones (yaw uses its wider dedicated deadzone)
-        yawDisp = (abs(yawDisp) < YAW_DEADZONE) ? 0 : yawDisp;
+        yawDisp = (abs(yawDisp) < CONTROL_DEADZONE) ? 0 : yawDisp;
         rollDisp = (abs(rollDisp) < CONTROL_DEADZONE) ? 0 : rollDisp;
         pitchDisp = (abs(pitchDisp) < CONTROL_DEADZONE) ? 0 : pitchDisp;
 
@@ -520,7 +519,7 @@ void updateOLEDDisplay()
             const int scale = 1;
             const int cW = charWidth(scale);
             const char *leftText = isArmed ? "Armed" : "Disarmed";
-            const char *rightText = isStabilizedMode ? "STABILIZED" : "Manual";
+            const char *rightText = isStabilizedMode ? "Automatic" : "Manual";
 
             int leftW = strLen(leftText) * cW;
             int basePipeLeftX = xCenter - (cW / 2);
@@ -1192,7 +1191,7 @@ void printTelemetryData()
     // === FLIGHT MODE STATUS ===
     Serial.print(" | Mode: ");
     if (isStabilizedMode)
-        Serial.print(" STABILIZED");
+        Serial.print(" STAB");
     else
         Serial.print("🎯MAN");
 
