@@ -16,11 +16,13 @@
  *
  * FreeRTOS Task Architecture:
  * - SensorTask: Reads all sensors (1Hz for environmental, 10Hz for GPS)
- * - RadioTask: Handles RF24 communication (5Hz control reception, 1Hz telemetry transmission)
+ * - RadioTask: Handles RF24 communication (now 500Hz polling for low-latency control reception, ~1Hz telemetry ack updates)
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
- * - MotorTask: ESC control with PID integration (50Hz)
- * - IMUTask: High-frequency IMU reading and calibration (100Hz)
- * - PIDTask: PID control loop for stabilization (50Hz)
+ * - MotorTask: ESC control with PID integration (200Hz, was 50Hz)
+ * - IMUTask: High-frequency IMU reading and calibration (200Hz)
+ * - PIDTask: PID control loop for stabilization (200Hz, was 50Hz)
+ *
+ * NOTE: Task frequencies updated to match WiFi code for consistent behavior
  *
  * NOTE: PID control is active but PID values are not transmitted in telemetry
  * to keep telemetry focused on sensor data only.
@@ -69,7 +71,7 @@
 #define MPU6050_ADDRESS 0x68
 
 // PID Control Configuration
-#define PID_LOOP_FREQUENCY 50                       // Hz - 50Hz PID loop for smooth control
+#define PID_LOOP_FREQUENCY 200                      // Hz - increased from 50Hz for faster stabilization
 #define PID_LOOP_PERIOD (1000 / PID_LOOP_FREQUENCY) // ms
 
 // Extended PID behavior configuration
@@ -185,22 +187,23 @@ struct ControlPacket
     uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Enhanced telemetry packet (22 bytes) - matches remote with lux, altitude, UV index, eCO2, and TVOC
+// Enhanced telemetry packet (development) - now with high precision GPS (lat/lon * 1e7)
+// NOTE: Size increased due to int32_t latitude/longitude; keep under NRF24 32-byte limit.
 struct TelemetryPacket
 {
-    int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal, prevents 16-bit overflow)
-    uint8_t humidity;      // % - Real AHT21 data
-    uint16_t battery;      // mV - Real battery voltage
-    int16_t latitude;      // GPS latitude (simplified)
-    int16_t longitude;     // GPS longitude (simplified)
-    uint8_t satellites;    // GPS satellite count
-    uint8_t status;        // System status
-    uint16_t lux;          // Light level in lux
-    int16_t altitude;      // Altitude in centimeters from BME280 (for 2 decimal precision)
-    uint16_t uvIndex;      // UV index x100 from GUVA sensor
-    uint16_t eCO2;         // Equivalent CO2 in ppm from ENS160
-    uint16_t TVOC;         // Total VOC in ppb from ENS160
+    int16_t temperature;  // x100 - Real BME280 data
+    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, avoids 16-bit overflow)
+    uint8_t humidity;     // % - Real AHT21 data
+    uint16_t battery;     // mV - Real battery voltage
+    int32_t latitudeE7;   // GPS latitude * 1e7 (high precision, ~1cm)
+    int32_t longitudeE7;  // GPS longitude * 1e7
+    uint8_t satellites;   // GPS satellite count
+    uint8_t status;       // System status
+    uint16_t lux;         // Light level in lux
+    int16_t altitude;     // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;     // UV index x100 from GUVA sensor
+    uint16_t eCO2;        // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;        // Total VOC in ppb from ENS160
 };
 
 // Enhanced PID Controller Structure with Advanced Features
@@ -628,31 +631,7 @@ volatile float pidAltitudeOutput = 0.0;
 // Matches prior manual mapping (~±200 roll/pitch, ±150 yaw)
 float MIX_KR = 100.0f; // Roll gain (μs per full command)
 float MIX_KP = 100.0f; // Pitch gain (μs per full command)
-float MIX_KY = 75.0f; // Yaw gain (μs per full command)
-
-// ================================
-// MOTOR CALIBRATION OFFSETS (μs)
-// Adjust these constants to fine-tune hover balance or counter small frame / motor / ESC mismatches.
-// Positive values INCREASE that motor's output. Keep within roughly ±50 for initial tuning.
-// Motor layout reference:
-//   M1 = Front Right  (CCW)
-//   M2 = Back  Right  (CW)
-//   M3 = Front Left   (CW)
-//   M4 = Back  Left   (CCW)
-// Example: If the quad drifts forward-right, you may slightly raise rear-left (M4) or lower front-right (M1).
-// NOTE: These are compile-time constants; change and rebuild to apply.
-#ifndef MOTOR1_OFFSET_US
-#define MOTOR1_OFFSET_US 0
-#endif
-#ifndef MOTOR2_OFFSET_US
-#define MOTOR2_OFFSET_US 0
-#endif
-#ifndef MOTOR3_OFFSET_US
-#define MOTOR3_OFFSET_US 0
-#endif
-#ifndef MOTOR4_OFFSET_US
-#define MOTOR4_OFFSET_US 0
-#endif
+float MIX_KY = 75.0f;  // Yaw gain (μs per full command)
 
 // PWM bounds (fallback to existing defines if present)
 #ifndef PWM_MIN_PULSE
@@ -662,7 +641,15 @@ float MIX_KY = 75.0f; // Yaw gain (μs per full command)
 #define PWM_MAX_PULSE ESC_MAX_PULSE
 #endif
 
-// (Runtime-adjustable motor offset variables removed in favor of compile-time constants above.)
+// ================================
+// Motor Calibration Offsets (μs)
+// Apply small per-motor corrections to compensate hardware imbalances.
+// Positive values increase that motor's command; defaults zero.
+// Applied AFTER mixing in all modes (manual and stabilized), same as v2.
+int MOTOR1_OFFSET_US = 0; // Front Right (CCW)
+int MOTOR2_OFFSET_US = 0; // Back  Right (CW)
+int MOTOR3_OFFSET_US = 0; // Front Left  (CW)
+int MOTOR4_OFFSET_US = 0; // Back  Left  (CCW)
 
 // ================================
 // Scaled Motor Mixing Function (Implements user-specified algorithm)
@@ -896,10 +883,15 @@ void setup()
                 sensors_event_t accel, gyro, temp;
                 if (mpu6050.getEvent(&accel, &gyro, &temp))
                 {
-                    float roll_acc = atan2(accel.acceleration.y, accel.acceleration.z) * 180.0f / PI;
-                    float pitch_acc = atan2(-accel.acceleration.x, sqrt(accel.acceleration.y * accel.acceleration.y + accel.acceleration.z * accel.acceleration.z)) * 180.0f / PI;
-                    gx += gyro.gyro.x * 180.0f / PI;
-                    gy += gyro.gyro.y * 180.0f / PI;
+                    // 90° CW rotation about Z: bodyX=sensorY, bodyY=-sensorX
+                    float bodyAccelX = accel.acceleration.y;
+                    float bodyAccelY = -accel.acceleration.x;
+                    float bodyAccelZ = accel.acceleration.z;
+                    float roll_acc = atan2(bodyAccelY, bodyAccelZ) * 180.0f / PI;
+                    float pitch_acc = atan2(-bodyAccelX, sqrt(bodyAccelY * bodyAccelY + bodyAccelZ * bodyAccelZ)) * 180.0f / PI;
+                    // Gyro mapping: rollRate=gyroY, pitchRate=-gyroX
+                    gx += gyro.gyro.y * 180.0f / PI;
+                    gy += (-gyro.gyro.x) * 180.0f / PI;
                     gz += gyro.gyro.z * 180.0f / PI;
                     rSum += roll_acc;
                     pSum += pitch_acc;
@@ -1107,8 +1099,8 @@ void sensorTask(void *parameter)
 void radioTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    // Increase poll rate to 200Hz to minimize input-to-motor latency
-    const TickType_t radioFrequency = pdMS_TO_TICKS(5); // 200Hz radio check
+    // Increased poll rate to 500Hz to further minimize input-to-motor latency
+    const TickType_t radioFrequency = pdMS_TO_TICKS(2); // 500Hz radio check
 
     for (;;)
     {
@@ -1162,11 +1154,12 @@ void initializeRadio()
 
     // Use EXACT same configuration as remote
     radio.openReadingPipe(0, address);
-    radio.setPALevel(RF24_PA_HIGH);  // Match remote power level
-    radio.setDataRate(RF24_250KBPS); // Match remote data rate (can try 1MBPS for even lower air time)
-    radio.setChannel(110);           // Move away from common Wi-Fi channels to reduce interference
+    radio.setPALevel(RF24_PA_HIGH); // Match remote power level
+    // Switched to 1MBPS for lower on-air time and reduced latency (both sides must match)
+    radio.setDataRate(RF24_1MBPS);
+    radio.setChannel(110); // Move away from common Wi-Fi channels to reduce interference
     radio.setAutoAck(true);
-    radio.setRetries(3, 5); // Shorter retry delay/count for lower worst-case latency
+    radio.setRetries(3, 5); // Keep short retry delay/count for low worst-case latency
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -1185,12 +1178,12 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-    telemetryData.temperature = 2500;          // 25.00°C
-    telemetryData.pressureX10 = 10132;         // 1013.2 hPa -> x10
-        telemetryData.humidity = 60;               // 60%
-        telemetryData.battery = 3700;              // 3.7V
-        telemetryData.latitude = 0;
-        telemetryData.longitude = 0;
+        telemetryData.temperature = 2500;  // 25.00°C
+        telemetryData.pressureX10 = 10132; // 101.32 kPa -> 1013.2 hPa
+        telemetryData.humidity = 60;       // 60%
+        telemetryData.battery = 3700;      // 3.7V
+        telemetryData.latitudeE7 = 0;
+        telemetryData.longitudeE7 = 0;
         telemetryData.satellites = 0;
         telemetryData.status = 0x01; // System OK
         telemetryData.lux = 500;     // 500 lux
@@ -1536,7 +1529,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-    localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10); // store with 0.1 hPa resolution
+        localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10);
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1631,7 +1624,7 @@ void readEnvironmentalSensors()
 
         static float pressure = 1013.20;
         pressure += (random(-5, 6) / 100.0); // simulate ~0.01 hPa steps
-    localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
+        localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
 
         localTelemetry.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }
@@ -1750,8 +1743,9 @@ void readEnvironmentalSensors()
     // Get GPS data from shared telemetry (GPS is updated in its own function)
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        localTelemetry.latitude = telemetryData.latitude;
-        localTelemetry.longitude = telemetryData.longitude;
+        // Copy high precision GPS values directly
+        localTelemetry.latitudeE7 = telemetryData.latitudeE7;
+        localTelemetry.longitudeE7 = telemetryData.longitudeE7;
         localTelemetry.satellites = telemetryData.satellites;
 
         // Update all telemetry data atomically
@@ -1835,8 +1829,8 @@ void updateGPS()
                 // Update GPS data in shared telemetry
                 if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
                 {
-                    telemetryData.latitude = (int16_t)(gps.location.lat() * 100);
-                    telemetryData.longitude = (int16_t)(gps.location.lng() * 100);
+                    telemetryData.latitudeE7 = (int32_t)(gps.location.lat() * 10000000.0);
+                    telemetryData.longitudeE7 = (int32_t)(gps.location.lng() * 10000000.0);
                     telemetryData.satellites = gps.satellites.value();
                     xSemaphoreGive(telemetryMutex);
                 }
@@ -1855,8 +1849,8 @@ void updateGPS()
     {
         if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            telemetryData.latitude = 0;
-            telemetryData.longitude = 0;
+            telemetryData.latitudeE7 = 0;
+            telemetryData.longitudeE7 = 0;
             telemetryData.satellites = 0;
             xSemaphoreGive(telemetryMutex);
         }
@@ -2053,7 +2047,7 @@ void printStatus()
 void motorTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t motorFrequency = pdMS_TO_TICKS(20); // 50Hz motor update (20ms)
+    const TickType_t motorFrequency = pdMS_TO_TICKS(5); // 200Hz motor update (5ms)
 
     for (;;)
     {
@@ -2110,122 +2104,110 @@ void calculateMotorSpeeds()
 // Latency-optimized variant using a snapshot of control inputs
 void calculateMotorSpeeds(const ControlPacket &receivedControl)
 {
-    // Track previous state of toggle2 for edge detection (stabilize/manual) across calls
-    static bool lastModeToggle = false; // reflects last observed (receivedControl.toggle2==1) while armed
-    // Check if motors should be armed (toggle switch 1 controls arming)
-    if (receivedControl.toggle1 == 1)
-    {
-        bool wasDisarmed = !motorsArmed;
-        motorsArmed = true;
+    // Minimal refactor: explicit edge tracking & PID mode change hygiene
+    static bool prevArmCmd = false;
+    static bool lastModeToggle = false; // cached toggle2 state while armed
+    bool armCmd = (receivedControl.toggle1 == 1);
+    bool modeToggle = (receivedControl.toggle2 == 1); // ON = Stabilized
 
-        // When first armed, check toggle2 for flight mode selection
-        if (wasDisarmed && currentFlightMode == FLIGHT_MODE_DISARMED)
+    // Rising edge: arming
+    if (armCmd && !prevArmCmd)
+    {
+        motorsArmed = true;
+        // Select initial mode based on toggle2
+        if (modeToggle)
         {
-            // Toggle 2 controls flight mode: ON = Stabilized, OFF = Manual
-            if (receivedControl.toggle2 == 1)
+            currentFlightMode = FLIGHT_MODE_STABILIZE;
+            pidEnabled = true;
+            stabilizedMode = true;
+            // Reset PID integrators to avoid stale windup on entry
+            rollPID.reset();
+            pitchPID.reset();
+            yawPID.reset();
+            altitudePID.reset();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                Serial.println("🔓 MOTORS ARMED - STABILIZED MODE (PID ON)");
+                xSemaphoreGive(serialMutex);
+            }
+        }
+        else
+        {
+            currentFlightMode = FLIGHT_MODE_MANUAL;
+            pidEnabled = false;
+            stabilizedMode = false;
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+            {
+                Serial.println("🔓 MOTORS ARMED - MANUAL MODE (PID OFF)");
+                xSemaphoreGive(serialMutex);
+            }
+        }
+        lastModeToggle = modeToggle; // initialize cache to suppress duplicate print
+    }
+    // While armed: detect mode toggle edge
+    else if (armCmd && prevArmCmd)
+    {
+        if (modeToggle != lastModeToggle)
+        {
+            if (modeToggle)
             {
                 currentFlightMode = FLIGHT_MODE_STABILIZE;
-                pidEnabled = true;     // Enable PID for stabilized mode
-                stabilizedMode = true; // Update status variable
-
+                pidEnabled = true;
+                stabilizedMode = true;
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset(); // altitude PID only when that mode engaged
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
-                    Serial.println("🔓 MOTORS ARMED - STABILIZED MODE ACTIVE (PID ON)");
+                    Serial.println("🛡️ FLIGHT MODE: STABILIZED (PID ON)");
                     xSemaphoreGive(serialMutex);
                 }
             }
             else
             {
                 currentFlightMode = FLIGHT_MODE_MANUAL;
-                pidEnabled = false;     // Disable PID for manual mode
-                stabilizedMode = false; // Update status variable
-
+                pidEnabled = false;
+                stabilizedMode = false;
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                 {
-                    Serial.println("🔓 MOTORS ARMED - MANUAL MODE ACTIVE (PID OFF)");
+                    Serial.println("🎯 FLIGHT MODE: MANUAL (PID OFF)");
                     xSemaphoreGive(serialMutex);
                 }
             }
-            // IMPORTANT: initialize lastModeToggle to current switch state so first post-arm change is detected
-            lastModeToggle = (receivedControl.toggle2 == 1);
-        }
-        else if (motorsArmed)
-        {
-            // Motors already armed - check for flight mode changes during flight
-            bool currentModeToggle = (receivedControl.toggle2 == 1);
-
-            if (currentModeToggle != lastModeToggle)
-            {
-                if (currentModeToggle)
-                {
-                    // Switch to Stabilized mode
-                    currentFlightMode = FLIGHT_MODE_STABILIZE;
-                    pidEnabled = true;
-                    stabilizedMode = true; // Update status variable
-
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                    {
-                        Serial.println("🛡️ FLIGHT MODE: STABILIZED (PID ON)");
-                        xSemaphoreGive(serialMutex);
-                    }
-                }
-                else
-                {
-                    // Switch to Manual mode
-                    currentFlightMode = FLIGHT_MODE_MANUAL;
-                    pidEnabled = false;
-                    stabilizedMode = false; // Update status variable
-
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                    {
-                        Serial.println("🎯 FLIGHT MODE: MANUAL (PID OFF)");
-                        xSemaphoreGive(serialMutex);
-                    }
-                }
-                lastModeToggle = currentModeToggle;
-            }
+            lastModeToggle = modeToggle;
         }
     }
-    else
+    // Falling edge: disarming
+    else if (!armCmd && prevArmCmd)
     {
-        // Motors being disarmed - trigger pressure re-calibration
-        static bool wasArmed = false;
-        if (wasArmed && motorsArmed) // Transition from armed to disarmed
+        // Re-calibrate altitude baseline if enough pressure samples collected
+        if (pressureCount >= PRESSURE_BUFFER_SIZE / 2)
         {
-            // Re-calibrate pressure reference and reset altitude offset
-            if (pressureCount >= PRESSURE_BUFFER_SIZE / 2) // Ensure we have enough samples
+            seaLevelPressure = exponentialPressure;
+            altitudeOffset = 44330.0 * (1.0 - pow(exponentialPressure / seaLevelPressure, 0.1903));
+            altitudeCalibrated = true;
+            lastAltitudeCalibration = millis();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
             {
-                seaLevelPressure = exponentialPressure;
-                altitudeOffset = 44330.0 * (1.0 - pow(exponentialPressure / seaLevelPressure, 0.1903));
-                altitudeCalibrated = true;
-                lastAltitudeCalibration = millis();
-
-                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
-                {
-                    Serial.printf("Altitude re-calibrated on disarm - Ref P: %.2f hPa, Offset: %.2f m\n",
-                                  seaLevelPressure, altitudeOffset);
-                    xSemaphoreGive(serialMutex);
-                }
+                Serial.printf("Altitude re-calibrated on disarm - Ref P: %.2f hPa, Offset: %.2f m\n", seaLevelPressure, altitudeOffset);
+                xSemaphoreGive(serialMutex);
             }
-
-            // Reset yaw angle to prevent accumulation
-            imuData.yaw = 0.0;
-            lastYawReset = millis();
         }
-        wasArmed = motorsArmed;
+        imuData.yaw = 0.0f; // reset yaw accumulation
+        lastYawReset = millis();
         motorsArmed = false;
-        stabilizedMode = false; // Reset flight mode status
+        stabilizedMode = false;
         currentFlightMode = FLIGHT_MODE_DISARMED;
         pidEnabled = false;
+        // Force motors to min below after armed check block
     }
+
+    prevArmCmd = armCmd;
 
     if (!motorsArmed)
     {
-        // Motors disarmed - all ESCs to minimum
         for (int i = 0; i < 4; i++)
-        {
             motorSpeeds[i] = ESC_ARM_PULSE;
-        }
         return;
     }
 
@@ -2538,7 +2520,8 @@ void initializeIMUAndPID()
 void imuTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t imuFrequency = pdMS_TO_TICKS(10); // 100Hz IMU reading
+    const TickType_t imuFrequency = pdMS_TO_TICKS(5); // 200Hz IMU reading to match WiFi code timing
+    static unsigned long lastIMUTime = 0;             // For dynamic dt calculation
 
     for (;;)
     {
@@ -2551,25 +2534,47 @@ void imuTask(void *parameter)
             if (readSuccess && xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
                 // Raw sensor data
-                imuData.accelX = accel.acceleration.x;
-                imuData.accelY = accel.acceleration.y;
-                imuData.accelZ = accel.acceleration.z;
-                imuData.gyroX = gyro.gyro.x * 180.0 / PI; // Convert to deg/s
-                imuData.gyroY = gyro.gyro.y * 180.0 / PI;
-                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;
+                // Apply 90° CW Z rotation mapping to body frame
+                imuData.accelX = accel.acceleration.y;     // bodyX
+                imuData.accelY = -accel.acceleration.x;    // bodyY
+                imuData.accelZ = accel.acceleration.z;     // bodyZ
+                imuData.gyroX = gyro.gyro.y * 180.0 / PI;  // roll rate
+                imuData.gyroY = -gyro.gyro.x * 180.0 / PI; // pitch rate
+                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;  // yaw rate
                 imuData.temperature = temp.temperature;
 
                 // Calculate roll and pitch from accelerometer
-                // Adjusted roll_acc sign (removed previous implicit convention) to align with control stick direction
-                float roll_acc = atan2(imuData.accelY, imuData.accelZ) * 180.0 / PI;
+                // Use full 3D angle calculation to match WiFi code for better accuracy during non-level attitudes
+                float roll_acc = atan2(imuData.accelY, sqrt(imuData.accelX * imuData.accelX + imuData.accelZ * imuData.accelZ)) * 180.0 / PI;
                 float pitch_acc = atan2(-imuData.accelX, sqrt(imuData.accelY * imuData.accelY + imuData.accelZ * imuData.accelZ)) * 180.0 / PI;
-                // Apply calibration offsets (calibration performed at startup)
-                // Apply calibration offsets
-                float gyroXCal = imuData.gyroX - imuCalibration.gyroXOffset;
-                float gyroYCal = imuData.gyroY - imuCalibration.gyroYOffset;
+                // Transform and subtract gyro calibration biases (original offsets in sensor frame)
+                // (Accelerometer bias terms not stored in this build; only roll/pitch angle offsets handled.)
+                // Gyro mapping: body roll rate = sensorY, body pitch rate = -sensorX
+                // Calibration stored: gyroXOffset = avg(gyro.gyro.y) => roll bias (body roll rate)
+                //                       gyroYOffset = avg(-gyro.gyro.x) => pitch bias (body pitch rate)
+                float gyroRollOffset = imuCalibration.gyroXOffset;  // roll bias in transformed frame
+                float gyroPitchOffset = imuCalibration.gyroYOffset; // pitch bias in transformed frame
+                float gyroXCal = imuData.gyroX - gyroRollOffset;
+                float gyroYCal = imuData.gyroY - gyroPitchOffset;
                 float gyroZCal = imuData.gyroZ - imuCalibration.gyroZOffset;
+                // Apply static level offsets so that calibrated orientation reads 0/0
                 float rollAccCal = roll_acc - imuCalibration.rollOffset;
                 float pitchAccCal = pitch_acc - imuCalibration.pitchOffset;
+                // Overwrite raw for subsequent fusion so downstream uses corrected values
+                roll_acc = rollAccCal;
+                pitch_acc = pitchAccCal;
+
+                // Calculate actual dt for better accuracy to match WiFi code approach
+                unsigned long currentTime = millis();
+                float dt = 0.005; // Default 5ms for 200Hz, but use actual timing when available
+                if (lastIMUTime > 0)
+                {
+                    dt = (currentTime - lastIMUTime) / 1000.0f; // Convert to seconds
+                    dt = constrain(dt, 0.001f, 0.02f);          // Constrain to reasonable range (1-20ms)
+                }
+                lastIMUTime = currentTime;
+
+                // Enhanced yaw drift correction
 
                 // Enhanced yaw drift correction
                 // Check if drone is stationary (low angular rates on all axes)
@@ -2607,7 +2612,7 @@ void imuTask(void *parameter)
                 // Apply adaptive bias correction to yaw gyro
                 float gyroZCorrected = gyroZCal - adaptiveGyroZBias;
 
-                float dt = 0.01; // 10ms loop time
+                // Use Kalman filter (1D) for roll/pitch if enabled
                 if (USE_KALMAN_ATTITUDE)
                 {
                     // 1D Kalman filter update for roll
@@ -2660,11 +2665,11 @@ void imuTask(void *parameter)
     }
 }
 
-// PID Control Task - Runs at 50Hz for smooth control
+// PID Control Task - Runs at 200Hz for smooth control to match WiFi code
 void pidControlTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t pidFrequency = pdMS_TO_TICKS(PID_LOOP_PERIOD); // 50Hz PID loop
+    const TickType_t pidFrequency = pdMS_TO_TICKS(PID_LOOP_PERIOD); // 200Hz PID loop
 
     for (;;)
     {
@@ -2988,7 +2993,7 @@ void updateFlightMode()
                 currentFlightMode = FLIGHT_MODE_STABILIZE;
                 pidEnabled = true;
 
-                // Reset PID controllers when enabling
+                // Reset PID integrators when enabling
                 rollPID.reset();
                 pitchPID.reset();
                 yawPID.reset();

@@ -16,7 +16,7 @@
  *
  * FreeRTOS Task Architecture:
  * - SensorTask: Reads all sensors (1Hz for environmental, 10Hz for GPS)
- * - RadioTask: Handles RF24 communication (5Hz control reception, 1Hz telemetry transmission)
+ * - RadioTask: Handles RF24 communication (now 500Hz polling for low-latency control reception, ~1Hz telemetry ack updates)
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
  * - MotorTask: ESC control with PID integration (50Hz)
  * - IMUTask: High-frequency IMU reading and calibration (100Hz)
@@ -188,19 +188,19 @@ struct ControlPacket
 // Enhanced telemetry packet (22 bytes) - matches remote with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
-    int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal, avoids 16-bit overflow)
-    uint8_t humidity;      // % - Real AHT21 data
-    uint16_t battery;      // mV - Real battery voltage
-    int16_t latitude;      // GPS latitude (simplified)
-    int16_t longitude;     // GPS longitude (simplified)
-    uint8_t satellites;    // GPS satellite count
-    uint8_t status;        // System status
-    uint16_t lux;          // Light level in lux
-    int16_t altitude;      // Altitude in centimeters from BME280 (for 2 decimal precision)
-    uint16_t uvIndex;      // UV index x100 from GUVA sensor
-    uint16_t eCO2;         // Equivalent CO2 in ppm from ENS160
-    uint16_t TVOC;         // Total VOC in ppb from ENS160
+    int16_t temperature;  // x100 - Real BME280 data
+    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, avoids 16-bit overflow)
+    uint8_t humidity;     // % - Real AHT21 data
+    uint16_t battery;     // mV - Real battery voltage
+    int16_t latitude;     // GPS latitude (simplified)
+    int16_t longitude;    // GPS longitude (simplified)
+    uint8_t satellites;   // GPS satellite count
+    uint8_t status;       // System status
+    uint16_t lux;         // Light level in lux
+    int16_t altitude;     // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;     // UV index x100 from GUVA sensor
+    uint16_t eCO2;        // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;        // Total VOC in ppb from ENS160
 };
 
 // Enhanced PID Controller Structure with Advanced Features
@@ -1091,8 +1091,8 @@ void sensorTask(void *parameter)
 void radioTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    // Increase poll rate to 200Hz to minimize input-to-motor latency
-    const TickType_t radioFrequency = pdMS_TO_TICKS(5); // 200Hz radio check
+    // Increased poll rate to 500Hz to further minimize input-to-motor latency
+    const TickType_t radioFrequency = pdMS_TO_TICKS(2); // 500Hz radio check
 
     for (;;)
     {
@@ -1146,11 +1146,12 @@ void initializeRadio()
 
     // Use EXACT same configuration as remote
     radio.openReadingPipe(0, address);
-    radio.setPALevel(RF24_PA_HIGH);  // Match remote power level
-    radio.setDataRate(RF24_250KBPS); // Match remote data rate (can try 1MBPS for even lower air time)
-    radio.setChannel(110);           // Move away from common Wi-Fi channels to reduce interference
+    radio.setPALevel(RF24_PA_HIGH); // Match remote power level
+    // Switched to 1MBPS for lower on-air time and reduced latency (both sides must match)
+    radio.setDataRate(RF24_1MBPS);
+    radio.setChannel(110); // Move away from common Wi-Fi channels to reduce interference
     radio.setAutoAck(true);
-    radio.setRetries(3, 5); // Shorter retry delay/count for lower worst-case latency
+    radio.setRetries(3, 5); // Keep short retry delay/count for low worst-case latency
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -1169,10 +1170,10 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-    telemetryData.temperature = 2500;          // 25.00°C
-    telemetryData.pressureX10 = 10132;         // 1013.2 hPa -> x10
-        telemetryData.humidity = 60;               // 60%
-        telemetryData.battery = 3700;              // 3.7V
+        telemetryData.temperature = 2500;  // 25.00°C
+        telemetryData.pressureX10 = 10132; // 1013.2 hPa -> x10
+        telemetryData.humidity = 60;       // 60%
+        telemetryData.battery = 3700;      // 3.7V
         telemetryData.latitude = 0;
         telemetryData.longitude = 0;
         telemetryData.satellites = 0;
@@ -1520,7 +1521,7 @@ void readEnvironmentalSensors()
         float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         localTelemetry.temperature = (int16_t)(temp * 100);
-    localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10);
+        localTelemetry.pressureX10 = (uint16_t)(currentPressure * 10);
 
         // Validate pressure reading
         if (currentPressure > 800 && currentPressure < 1200)
@@ -1615,7 +1616,7 @@ void readEnvironmentalSensors()
 
         static float pressure = 1013.20;
         pressure += (random(-5, 6) / 100.0); // simulate ~0.01 hPa steps
-    localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
+        localTelemetry.pressureX10 = (uint16_t)(pressure * 10);
 
         localTelemetry.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }

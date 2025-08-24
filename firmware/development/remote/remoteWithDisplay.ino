@@ -38,7 +38,7 @@
 #define WIFI_PASSWORD "0N7NT00ANTQ"
 
 // Upload frequency configuration (in milliseconds)
-#define FIREBASE_UPLOAD_INTERVAL 5000 // 5 seconds (conservative for stability)
+#define FIREBASE_UPLOAD_INTERVAL 1000 // 1 second (conservative for stability)
 #define FIREBASE_ENABLED true         // Enabled with simple approach
 
 // OLED Display Configuration - Set to false to completely disable OLED functionality
@@ -93,22 +93,22 @@ struct ControlPacket
     uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Enhanced telemetry packet (22 bytes) - matches drone with lux, altitude, UV index, eCO2, and TVOC
+// Enhanced telemetry packet (30 bytes) - matches drone with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
-    int16_t temperature;   // x100 - Real BME280 data
-    uint16_t pressureX10;  // x10 - Real BME280 data (one decimal to avoid overflow)
-    uint8_t humidity;      // % - Real BME280 data
-    uint16_t battery;      // mV - Real battery voltage
-    int16_t latitude;      // GPS latitude (simplified)
-    int16_t longitude;     // GPS longitude (simplified)
-    uint8_t satellites;    // GPS satellite count
-    uint8_t status;        // System status
-    uint16_t lux;          // Light level in lux
-    int16_t altitude;      // Altitude in centimeters from BME280 (for 2 decimal precision)
-    uint16_t uvIndex;      // UV index x100 from GUVA sensor
-    uint16_t eCO2;         // Equivalent CO2 in ppm from ENS160
-    uint16_t TVOC;         // Total VOC in ppb from ENS160
+    int16_t temperature;  // x100 - Real BME280 data
+    uint16_t pressureX10; // x10 - Real BME280 data (one decimal, avoids overflow)
+    uint8_t humidity;     // % - Real BME280 data
+    uint16_t battery;     // mV - Real battery voltage
+    int32_t latitudeE7;   // latitude * 1e7
+    int32_t longitudeE7;  // longitude * 1e7
+    uint8_t satellites;   // GPS satellite count
+    uint8_t status;       // System status
+    uint16_t lux;         // Light level in lux
+    int16_t altitude;     // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;     // UV index x100 from GUVA sensor
+    uint16_t eCO2;        // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;        // Total VOC in ppb from ENS160
 };
 
 ControlPacket controlData;
@@ -128,6 +128,8 @@ const int16_t THROTTLE_RATE = 120;     // Throttle change rate per update (reach
 const int16_t THROTTLE_MIN = 0;        // Minimum throttle value (0% power)
 const int16_t THROTTLE_MAX = 3000;     // Maximum throttle value (100% power)
 const int16_t CONTROL_DEADZONE = 150;  // Deadzone for roll/pitch/yaw controls
+// Custom yaw deadzone (requested): applies only to yaw, wider than generic control deadzone
+const int16_t YAW_DEADZONE = 250; // Deadzone for yaw (±250)
 
 // Safety and control mode variables
 bool isArmed = false;          // Arm/disarm state (Toggle 1)
@@ -491,7 +493,8 @@ void updateOLEDDisplay()
         int joy2_y_disp = analogRead(JOY2_Y_PIN);
         int16_t yawDisp = map(joy1_x_disp, 0, 4095, -3000, 3000);
         int16_t rollDisp = map(joy2_x_disp, 0, 4095, -3000, 3000);
-        int16_t pitchDisp = map(joy2_y_disp, 0, 4095, -3000, 3000);
+        // Inverted pitch display mapping (user request)
+        int16_t pitchDisp = map(joy2_y_disp, 0, 4095, 3000, -3000);
         yawDisp = (abs(yawDisp) < CONTROL_DEADZONE) ? 0 : yawDisp;
         rollDisp = (abs(rollDisp) < CONTROL_DEADZONE) ? 0 : rollDisp;
         pitchDisp = (abs(pitchDisp) < CONTROL_DEADZONE) ? 0 : pitchDisp;
@@ -829,13 +832,13 @@ void setup()
     }
 
     radio.openWritingPipe(address);
-    radio.setPALevel(RF24_PA_HIGH);  // High power for range
-    radio.setDataRate(RF24_250KBPS); // Keep 250kbps for robustness
-    radio.setChannel(110);           // Match drone channel, away from Wi-Fi
+    radio.setPALevel(RF24_PA_HIGH); // High power for range
+    // Switched to 1MBPS for lower latency (must match drone configuration)
+    radio.setDataRate(RF24_1MBPS);
+    radio.setChannel(110); // Match drone channel, away from Wi-Fi
     radio.setAutoAck(true);
-    // Increase retries to improve ACK reliability in noisy environments
-    // delay: 10 (approx 2.5ms), count: 15 attempts
-    radio.setRetries(10, 15);
+    // Shorter retry window to cap worst-case latency (delay:3 => ~750us; count:5 attempts)
+    radio.setRetries(3, 5);
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
 
@@ -863,7 +866,7 @@ void setup()
 
     // Startup animation already shown immediately after OLED init
 
-    Serial.print("Starting PROVEN control transmission (5Hz) with virtual throttle mode");
+    Serial.print("Starting low-latency control transmission (50Hz) with virtual throttle mode");
     if (FIREBASE_ENABLED)
     {
         Serial.print(" and cloud upload every ");
@@ -899,7 +902,7 @@ void setup()
     Serial.println("  - Virtual 3000 = Transmitted +3000 (100% power)"); // Print radio configuration for debugging
     Serial.println("Radio Configuration:");
     Serial.print("  Power Level: RF24_PA_HIGH");
-    Serial.print(", Data Rate: RF24_250KBPS");
+    Serial.print(", Data Rate: RF24_1MBPS");
     Serial.print(", Channel: ");
     Serial.print(radio.getChannel());
     Serial.print(", CRC: 16-bit");
@@ -971,8 +974,7 @@ void loop()
         }
     }
 
-    // Small delay to prevent overwhelming the system
-    delay(10);
+    // Removed fixed delay to reduce control latency; loop paced by 20ms send interval
 
     // Handle toggle switch safety and mode features
     handleSafetyToggleSwitches();
@@ -1060,10 +1062,11 @@ void readJoystickInputs()
         // Map other controls with deadzone filtering
         int16_t yawInput = map(joy1_x, 0, 4095, -3000, 3000);
         int16_t rollInput = map(joy2_x, 0, 4095, -3000, 3000);
-        int16_t pitchInput = map(joy2_y, 0, 4095, -3000, 3000);
+        // Inverted pitch control mapping (user request)
+        int16_t pitchInput = map(joy2_y, 0, 4095, 3000, -3000);
 
-        // Apply deadzone filtering for other controls
-        controlData.yaw = (abs(yawInput) < CONTROL_DEADZONE) ? 0 : yawInput;
+        // Apply deadzone filtering (yaw uses its own wider deadzone)
+        controlData.yaw = (abs(yawInput) < YAW_DEADZONE) ? 0 : yawInput;
         controlData.roll = (abs(rollInput) < CONTROL_DEADZONE) ? 0 : rollInput;
         controlData.pitch = (abs(pitchInput) < CONTROL_DEADZONE) ? 0 : pitchInput;
     }
@@ -1246,9 +1249,9 @@ void printTelemetryData()
     if (telemetryData.satellites > 0)
     {
         Serial.print("(");
-        Serial.print(telemetryData.latitude / 100.0, 4);
+        Serial.print(telemetryData.latitudeE7 / 10000000.0, 7);
         Serial.print(",");
-        Serial.print(telemetryData.longitude / 100.0, 4);
+        Serial.print(telemetryData.longitudeE7 / 10000000.0, 7);
         Serial.print(")");
     }
     else
@@ -1464,9 +1467,6 @@ void uploadTelemetryToFirebase()
     json.set("temperature", telemetryData.temperature / 100.0);
     json.set("humidity", telemetryData.humidity);
     json.set("pressure", telemetryData.pressureX10 / 10.0);
-    json.set("pressure", telemetryData.pressureX10 / 10.0);
-    Serial.print(telemetryData.pressureX10 / 10.0, 1);
-    json.set("pressure", telemetryData.pressureX10 / 10.0);
     json.set("altitude", telemetryData.altitude / 100.0);
     json.set("battery", telemetryData.battery);
     json.set("lux", telemetryData.lux);
@@ -1474,8 +1474,8 @@ void uploadTelemetryToFirebase()
     json.set("eCO2", telemetryData.eCO2);
     json.set("TVOC", telemetryData.TVOC);
     json.set("gps_satellites", telemetryData.satellites);
-    json.set("gps_latitude", telemetryData.latitude / 100.0);
-    json.set("gps_longitude", telemetryData.longitude / 100.0);
+    json.set("gps_latitude", telemetryData.latitudeE7 / 10000000.0);
+    json.set("gps_longitude", telemetryData.longitudeE7 / 10000000.0);
     json.set("status", telemetryData.status);
 
     String dataPath = "/telemetry/" + String(timestamp);

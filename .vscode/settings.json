@@ -1,6 +1,7 @@
 {
-    "files.associations": {
-        "string_view": "cpp",
-        "regex": "cpp"
-    }
+  "files.associations": {
+    "string_view": "cpp",
+    "regex": "cpp",
+    "cmath": "cpp"
+  }
 }
