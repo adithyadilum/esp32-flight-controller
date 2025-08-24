@@ -228,15 +228,14 @@ The drone features a dual flight mode system for enhanced control flexibility:
 
 #### Status Indicators
 
-| LED Position     | Color | GPIO Pin | Function         |
-| ---------------- | ----- | -------- | ---------------- |
-| **Front Right**  | Green | GPIO 32  | Navigation light |
-| **Back Right**   | Green | GPIO 33  | Navigation light |
-| **Back Left**    | Red   | GPIO 25  | Navigation light |
-| **Front Center** | White | GPIO 17  | Status indicator |
-| **Front Left**   | Red   | GPIO 02  | Navigation light |
-| **Back Center**  | White | GPIO 15  | Status indicator |
-| **Buzzer**       | Audio | GPIO 26  | Alert sounds     |
+| LED Position    | Color | GPIO Pin | Function         |
+| --------------- | ----- | -------- | ---------------- |
+| **Front Right** | Green | GPIO 32  | Navigation light |
+| **Back Right**  | Green | GPIO 33  | Navigation light |
+| **Back Left**   | Red   | GPIO 25  | Navigation light |
+| **Front Left**  | Red   | GPIO 02  | Navigation light |
+| **Back Center** | White | GPIO 15  | Status indicator |
+| **Buzzer**      | Audio | GPIO 26  | Alert sounds     |
 
 ## 📡 Communication Protocols
 

@@ -52,6 +52,14 @@
 #define GPS_TX_PIN 17
 #define GUVA_PIN 36 // GUVA-S12SD UV sensor
 
+// Status and Navigation Light Pins
+#define LED_FRONT_RIGHT 32 // Green navigation light
+#define LED_BACK_RIGHT 33  // Green navigation light
+#define LED_BACK_LEFT 25   // Red navigation light
+#define LED_FRONT_LEFT 2   // Red navigation light
+#define LED_STATUS 15      // White status indicator
+#define BUZZER_PIN 26      // Audio alerts
+
 // ESC Control Pins (PWM Outputs to Brushless Motors)
 #define ESC1_PIN 13 // Front Right (CCW)
 #define ESC2_PIN 12 // Back Right (CW)
@@ -610,7 +618,16 @@ const unsigned long STATIONARY_THRESHOLD_TIME = 5000; // 5 seconds to consider s
 // PID and Flight Control Variables
 bool pidEnabled = false;
 bool imuInitialized = false;
-bool enableVerboseLogging = false;   // Debug verbose logging control
+bool enableVerboseLogging = false; // Debug verbose logging control
+
+// LED and Status Indicator Variables
+bool statusLedState = false;
+unsigned long lastStatusBlink = 0;
+unsigned long lastBootupBuzz = 0;
+bool navigationLightsOn = true;      // Navigation lights always on when powered
+bool systemInitialized = false;      // Tracks if system is fully initialized
+bool bootupAlertPlayed = false;      // Prevent repeated bootup alert
+bool lastArmedState = false;         // Track previous armed state to detect changes
 float targetAltitude = 0.0;          // Target altitude for altitude hold mode
 float baseThrottleForHover = 1400.0; // Base throttle for hovering (will be auto-adjusted)
 unsigned long lastPIDUpdate = 0;
@@ -763,6 +780,35 @@ static inline void applyScaledMotorMix(float T, float R, float P, float Y)
 void updateFlightMode();
 float getFilteredAltitude();
 void updateBaroAltitude();
+void initializeLEDs();
+void updateStatusIndicators();
+void navigationLights(bool enable);
+void statusAlert(uint8_t type);
+
+// Task function declarations
+void sensorTask(void *parameter);
+void radioTask(void *parameter);
+void statusTask(void *parameter);
+void motorTask(void *parameter);
+void imuTask(void *parameter);
+void pidControlTask(void *parameter);
+
+// Initialization function declarations
+void initializeRealSensors();
+void initializeIMUAndPID();
+void initializeRadio();
+void initializeTelemetryData();
+
+// Sensor and control function declarations
+void readEnvironmentalSensors();
+void updateGPS();
+void handleControlData();
+void printStatus();
+void scanI2CBus();
+void calibrateAltitude();
+void calculateMotorSpeeds();
+void calculateMotorSpeeds(const ControlPacket &receivedControl);
+void simpleBuzz(int duration_ms);
 
 void setup()
 {
@@ -809,6 +855,7 @@ void setup()
     for (int i = 0; i < 4; i++)
         motorSpeeds[i] = ESC_ARM_PULSE;
     motorsArmed = false;
+    lastArmedState = false; // Initialize state tracking
 
     Serial.println("Initializing system components...");
 
@@ -824,6 +871,9 @@ void setup()
     // Configure ADC attenuation for accurate battery measurements up to ~3.3V
     analogSetAttenuation(ADC_11db);
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
+
+    // Initialize LED and buzzer pins
+    initializeLEDs();
 
     // Initialize GPS (Serial2 on ESP32)
     Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -1022,11 +1072,19 @@ void setup()
     Serial.println("✓ All FreeRTOS tasks created successfully");
     Serial.println("✓ System initialization complete");
     Serial.println("Starting multitasking operation...");
+
+    // Mark system as initialized (no startup alert to prevent issues)
+    systemInitialized = true;
+    // statusAlert(1); // Bootup complete alert - DISABLED to prevent continuous buzzing
+}
 }
 
 void loop()
 {
     // FreeRTOS handles all tasks - main loop can be minimal
+    // Update status indicators frequently for responsive LED blinking
+    updateStatusIndicators();
+
     // Print memory usage periodically
     static unsigned long lastMemCheck = 0;
     if (millis() - lastMemCheck > 30000) // Every 30 seconds
@@ -1048,7 +1106,7 @@ void loop()
     }
 
     // Yield to FreeRTOS scheduler
-    vTaskDelay(pdMS_TO_TICKS(5000)); // Sleep for 5 seconds
+    vTaskDelay(pdMS_TO_TICKS(100)); // Sleep for 100ms to allow responsive LED updates
 }
 
 void sensorTask(void *parameter)
@@ -1120,11 +1178,14 @@ void radioTask(void *parameter)
 void statusTask(void *parameter)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t statusFrequency = pdMS_TO_TICKS(10000); // 0.1Hz (every 10 seconds)
+    const TickType_t statusFrequency = pdMS_TO_TICKS(1000); // 1Hz (every 1 second) for responsive LED updates
 
     for (;;)
     {
         statusTaskCounter++;
+
+        // Update status indicators (LEDs and alerts)
+        updateStatusIndicators();
 
         // Print system status
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(500)) == pdTRUE)
@@ -1178,10 +1239,10 @@ void initializeTelemetryData()
 {
     if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
     {
-        telemetryData.temperature = 2500;  // 25.00°C
+        telemetryData.temperature = 3100;  // 25.00°C
         telemetryData.pressureX10 = 10132; // 101.32 kPa -> 1013.2 hPa
         telemetryData.humidity = 60;       // 60%
-        telemetryData.battery = 3700;      // 3.7V
+        telemetryData.battery = 11000;     // 3.7V
         telemetryData.latitudeE7 = 0;
         telemetryData.longitudeE7 = 0;
         telemetryData.satellites = 0;
@@ -2062,7 +2123,12 @@ void motorTask(void *parameter)
             {
                 motorSpeeds[i] = ESC_ARM_PULSE;
             }
+            if (motorsArmed && lastArmedState) // Only alert when going from armed to disarmed
+            {
+                statusAlert(4); // Disarmed alert (timeout)
+            }
             motorsArmed = false;
+            lastArmedState = motorsArmed;
         }
         else
         {
@@ -2114,6 +2180,7 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
     if (armCmd && !prevArmCmd)
     {
         motorsArmed = true;
+        statusAlert(2); // Armed alert
         // Select initial mode based on toggle2
         if (modeToggle)
         {
@@ -2195,7 +2262,12 @@ void calculateMotorSpeeds(const ControlPacket &receivedControl)
         }
         imuData.yaw = 0.0f; // reset yaw accumulation
         lastYawReset = millis();
+        if (motorsArmed && lastArmedState) // Only alert when going from armed to disarmed
+        {
+            statusAlert(4); // Disarmed alert (manual)
+        }
         motorsArmed = false;
+        lastArmedState = motorsArmed;
         stabilizedMode = false;
         currentFlightMode = FLIGHT_MODE_DISARMED;
         pidEnabled = false;
@@ -3084,4 +3156,131 @@ float getFilteredAltitude()
     float gpsAlt = gpsAltitudeMeters;
     bool useGPS = (sats >= 4) && !isnan(gpsAlt) && fabs(gpsAlt) < 10000.0f;
     return useGPS ? gpsAlt : baroAltM;
+}
+
+// ================================
+// LED AND STATUS INDICATOR FUNCTIONS
+// ================================
+
+// Initialize LED and buzzer pins
+void initializeLEDs()
+{
+    // Configure navigation light pins
+    pinMode(LED_FRONT_RIGHT, OUTPUT);
+    pinMode(LED_BACK_RIGHT, OUTPUT);
+    pinMode(LED_BACK_LEFT, OUTPUT);
+    pinMode(LED_FRONT_LEFT, OUTPUT);
+    pinMode(LED_STATUS, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+
+    // Turn on navigation lights immediately (always on when powered)
+    navigationLights(true);
+
+    // Start with status LED off
+    digitalWrite(LED_STATUS, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    // Force buzzer OFF for debugging
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    Serial.println("✓ LED and buzzer pins initialized");
+    Serial.println("✓ Buzzer forced OFF");
+}
+
+// Control navigation lights
+void navigationLights(bool enable)
+{
+    navigationLightsOn = enable;
+
+    if (enable)
+    {
+        // Front lights: Red=Left, Green=Right (standard aviation)
+        digitalWrite(LED_FRONT_LEFT, HIGH);  // Red navigation light
+        digitalWrite(LED_FRONT_RIGHT, HIGH); // Green navigation light
+        // Back lights: Same pattern
+        digitalWrite(LED_BACK_LEFT, HIGH);  // Red navigation light
+        digitalWrite(LED_BACK_RIGHT, HIGH); // Green navigation light
+    }
+    else
+    {
+        digitalWrite(LED_FRONT_LEFT, LOW);
+        digitalWrite(LED_FRONT_RIGHT, LOW);
+        digitalWrite(LED_BACK_LEFT, LOW);
+        digitalWrite(LED_BACK_RIGHT, LOW);
+    }
+}
+
+// Update status indicators based on system state
+void updateStatusIndicators()
+{
+    unsigned long currentTime = millis();
+
+    // Status LED behavior based on system state
+    if (!systemInitialized)
+    {
+        // During initialization: fast blink
+        if (currentTime - lastStatusBlink >= 200)
+        {
+            statusLedState = !statusLedState;
+            digitalWrite(LED_STATUS, statusLedState);
+            lastStatusBlink = currentTime;
+        }
+    }
+    else if (!motorsArmed)
+    {
+        // Disarmed: slow blink (waiting to arm)
+        if (currentTime - lastStatusBlink >= 1000)
+        {
+            statusLedState = !statusLedState;
+            digitalWrite(LED_STATUS, statusLedState);
+            lastStatusBlink = currentTime;
+        }
+    }
+    else
+    {
+        // Armed: solid on
+        digitalWrite(LED_STATUS, HIGH);
+    }
+}
+
+// Status alerts with buzzer (essential alerts only)
+void statusAlert(uint8_t type)
+{
+    switch (type)
+    {
+    case 1:                     // Bootup complete
+        if (!bootupAlertPlayed) // Only play once
+        {
+            simpleBuzz(200); // Short buzz
+            delay(100);
+            simpleBuzz(200); // Second short buzz
+            bootupAlertPlayed = true;
+        }
+        break;
+
+    case 2:              // Armed
+        simpleBuzz(100); // Quick beep
+        delay(100);
+        simpleBuzz(100); // Second quick beep
+        break;
+
+    case 4:              // Disarmed
+        simpleBuzz(300); // Longer buzz
+        break;
+
+    default:
+        // Single beep for unknown alerts
+        simpleBuzz(150); // Medium buzz
+        break;
+    }
+}
+
+// Simple buzzer function using digitalWrite (more reliable than tone)
+void simpleBuzz(int duration_ms)
+{
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(duration_ms);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(50); // Small gap to ensure buzzer stops completely
 }
